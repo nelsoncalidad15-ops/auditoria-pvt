@@ -1,0 +1,52 @@
+{
+  "entities": {
+    "Auditor": {
+      "title": "Auditor",
+      "description": "Un auditor registrado en el sistema.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "AuditSession": {
+      "title": "Sesión de Auditoría",
+      "description": "Una sesión completa de auditoría realizada por un auditor.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "auditorId": { "type": "string" },
+        "location": { "type": "string", "enum": ["Salta", "Jujuy"] },
+        "totalScore": { "type": "number" },
+        "notes": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "question": { "type": "string" },
+              "category": { "type": "string" },
+              "status": { "type": "string", "enum": ["pass", "fail", "na"] },
+              "comment": { "type": "string" },
+              "photoUrl": { "type": "string" }
+            }
+          }
+        }
+      },
+      "required": ["id", "date", "auditorId", "location", "totalScore", "items"]
+    }
+  },
+  "firestore": {
+    "/auditors/{auditorId}": {
+      "schema": "Auditor",
+      "description": "Colección de auditores."
+    },
+    "/audits/{auditId}": {
+      "schema": "AuditSession",
+      "description": "Colección de auditorías realizadas."
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "AuditPro Calidad",
+  "description": "Aplicación profesional para auditorías de postventa y calidad en Salta y Jujuy.",
+  "requestFramePermissions": ["camera"]
+}

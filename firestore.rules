@@ -1,0 +1,74 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: auditors
+    // Document ID: auditorId
+    // Fields:
+    //   - id: string (required)
+    //   - name: string (required)
+    //
+    // Collection: audits
+    // Document ID: auditId
+    // Fields:
+    //   - id: string (required)
+    //   - date: string (required, format: date)
+    //   - auditorId: string (required)
+    //   - location: string (required, enum: ["Salta", "Jujuy"])
+    //   - totalScore: number (required)
+    //   - notes: string (optional)
+    //   - items: list (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "tesis.fiunju@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidAudit(data) {
+      return data.id is string &&
+             data.date is string &&
+             data.auditorId is string &&
+             data.location in ['Salta', 'Jujuy'] &&
+             data.totalScore is number &&
+             data.items is list;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /auditors/{auditorId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /audits/{auditId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidAudit(request.resource.data);
+      allow update, delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isOwner(userId) && request.resource.data.role == 'user';
+      allow update: if isAdmin();
+    }
+  }
+}
