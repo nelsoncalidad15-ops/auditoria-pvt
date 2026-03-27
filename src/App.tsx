@@ -456,10 +456,6 @@ function AuditApp() {
   };
 
   const startNewAudit = () => {
-    if (!user) {
-      handleLogin();
-      return;
-    }
     setSession({
       id: crypto.randomUUID(),
       date: new Date().toISOString().split("T")[0],
@@ -935,17 +931,7 @@ function AuditApp() {
               exit={{ opacity: 0, y: -20 }}
               className="space-y-6"
             >
-              {!user && (
-                <div className="bg-blue-50 border border-blue-100 p-4 rounded-2xl flex items-start gap-3">
-                  <div className="bg-blue-500 p-1.5 rounded-full text-white">
-                    <User className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-bold text-blue-900 leading-tight">Inicia sesión para auditar</p>
-                    <p className="text-xs text-blue-700 mt-1">Tus auditorías se guardarán de forma segura en la nube.</p>
-                  </div>
-                </div>
-              )}
+
 
               <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-[2.5rem] p-8 shadow-xl shadow-blue-100 text-center space-y-6 relative overflow-hidden">
                 <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
@@ -971,12 +957,8 @@ function AuditApp() {
                       isLoggingIn && "opacity-70 cursor-not-allowed"
                     )}
                   >
-                    {isLoggingIn ? (
-                      <div className="w-5 h-5 border-2 border-blue-700/30 border-t-blue-700 rounded-full animate-spin" />
-                    ) : (
-                      <Plus className="w-5 h-5" />
-                    )}
-                    {isLoggingIn ? "Ingresando..." : (user ? "Iniciar Ahora" : "Ingresar para Iniciar")}
+                    <Plus className="w-5 h-5" />
+                    Iniciar Ahora
                   </button>
                   
                   <button 
