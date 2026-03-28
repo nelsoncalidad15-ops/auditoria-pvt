@@ -1,21 +1,25 @@
 export type Location = "Salta" | "Jujuy";
 
-export type Role = 
-  | "Asesores de servicio"
-  | "Asesores de cita"
-  | "Subgerente de servicio"
-  | "Jefe de Taller"
-  | "Técnicos"
-  | "Garantía"
-  | "Repuestos"
-  | "Jefe de Repuestos"
-  | "Lavadero"
-  | "Pre Entrega"
-  | "Ordenes";
+export type AuditStructureScope = "global" | Location;
+
+export type Role = string;
 
 export interface Auditor {
   id: string;
   name: string;
+}
+
+export interface AuditTemplateItem {
+  id: string;
+  text: string;
+  required: boolean;
+}
+
+export interface AuditCategory {
+  id: string;
+  name: string;
+  items: AuditTemplateItem[];
+  staffOptions: string[];
 }
 
 export interface AuditItem {

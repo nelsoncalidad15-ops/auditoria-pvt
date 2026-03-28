@@ -1,1 +1,99 @@
 @import "tailwindcss";
+
+:root {
+	color-scheme: light;
+	--bg: #f4efe6;
+	--panel: rgba(255, 255, 255, 0.72);
+	--panel-strong: rgba(255, 255, 255, 0.9);
+	--text: #1f2937;
+	--muted: #64748b;
+	--line: rgba(148, 163, 184, 0.22);
+	--brand: #0f766e;
+	--brand-strong: #115e59;
+	--accent: #d97706;
+	--shadow-soft: 0 20px 60px rgba(15, 23, 42, 0.08);
+}
+
+html {
+	background:
+		radial-gradient(circle at top left, rgba(15, 118, 110, 0.2), transparent 28%),
+		radial-gradient(circle at bottom right, rgba(217, 119, 6, 0.18), transparent 24%),
+		linear-gradient(180deg, #f9f5ef 0%, #f3ede4 100%);
+	min-height: 100%;
+}
+
+body {
+	min-height: 100vh;
+	margin: 0;
+	color: var(--text);
+	font-family: "Segoe UI Variable Display", "Trebuchet MS", "Gill Sans", sans-serif;
+	background: transparent;
+}
+
+body::before {
+	content: "";
+	position: fixed;
+	inset: 0;
+	background-image:
+		linear-gradient(rgba(255, 255, 255, 0.12) 1px, transparent 1px),
+		linear-gradient(90deg, rgba(255, 255, 255, 0.12) 1px, transparent 1px);
+	background-size: 32px 32px;
+	mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.8), transparent 92%);
+	pointer-events: none;
+}
+
+#root {
+	min-height: 100vh;
+}
+
+.glass-panel {
+	background: linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0%, rgba(255, 255, 255, 0.82) 100%);
+	border: 1px solid rgba(255, 255, 255, 0.72);
+	box-shadow: var(--shadow-soft);
+	backdrop-filter: blur(18px);
+}
+
+.hero-shell {
+	background:
+		radial-gradient(circle at top right, rgba(14, 165, 233, 0.14), transparent 28%),
+		radial-gradient(circle at bottom left, rgba(245, 158, 11, 0.12), transparent 26%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0%, rgba(248, 250, 252, 0.82) 100%);
+	border: 1px solid rgba(255, 255, 255, 0.72);
+	box-shadow: var(--shadow-soft);
+}
+
+* {
+	scrollbar-width: thin;
+	scrollbar-color: rgba(15, 118, 110, 0.35) transparent;
+}
+
+*::-webkit-scrollbar {
+	width: 10px;
+	height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+	background: rgba(15, 118, 110, 0.35);
+	border-radius: 999px;
+}
+
+*::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.sidebar-scroll::-webkit-scrollbar {
+	width: 6px;
+}
+
+.sidebar-scroll::-webkit-scrollbar-thumb {
+	background: rgba(148, 163, 184, 0.25);
+}
+
+.sidebar-scroll {
+	scrollbar-width: thin;
+	scrollbar-color: rgba(148, 163, 184, 0.25) transparent;
+}
+
+::selection {
+	background: rgba(15, 118, 110, 0.18);
+}

@@ -3,9 +3,8 @@ import { Role } from "./types";
 export const LOCATIONS = ["Salta", "Jujuy"] as const;
 
 export const AUDITORS = [
-  { id: "1", name: "Auditor 1" },
-  { id: "2", name: "Auditor 2" },
-  { id: "3", name: "Auditor 3" },
+  { id: "1", name: "Melisa Condori" },
+  { id: "2", name: "Nelson Notario" },
 ];
 
 export const STAFF: Record<Role, string[]> = {
@@ -59,7 +58,7 @@ export const AUDIT_QUESTIONS: Record<Role, string[]> = {
   "Asesores de cita": [
     "¿Se confirmó la cita con 24hs de antelación?",
     "¿Se verificó la disponibilidad de repuestos?",
-    "¿Se registró correctamente el motivo de la visita?",
+    "¿Se registró correctamente el motivo de la visita?"
   ],
   "Técnicos": [
     "Se Registra de manera detallada el Diagnóstico (Lenguaje Técnico).",

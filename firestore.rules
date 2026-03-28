@@ -65,6 +65,10 @@ service cloud.firestore {
       allow update, delete: if isAdmin();
     }
 
+    match /appConfig/{configId} {
+      allow read, write: if isAuthenticated();
+    }
+
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
       allow create: if isAuthenticated() && isOwner(userId) && request.resource.data.role == 'user';

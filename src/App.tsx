@@ -8,14 +8,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect } from "react";
 import { 
   ClipboardCheck, 
   MapPin, 
   User, 
   Calendar as CalendarIcon, 
   ChevronRight, 
-  ChevronLeft, 
   CheckCircle2, 
   XCircle, 
   MinusCircle,
@@ -44,16 +43,11 @@ import {
   TrendingUp,
   Users,
   Target,
-  TrendingDown,
   AlertCircle,
   Clock,
-  Download,
-  Filter,
-  MoreVertical
+  Trash2
 } from "lucide-react";
 import { 
-  LineChart, 
-  Line, 
   XAxis, 
   YAxis, 
   CartesianGrid, 
@@ -66,14 +60,15 @@ import {
   Cell 
 } from 'recharts';
 import { motion, AnimatePresence } from "motion/react";
-import { cn } from "./lib/utils";
+import { cn, createClientId } from "./lib/utils";
+import { buildAuditSyncPayload, sendAuditToWebhook } from "./services/audit-sync";
+import { loadAuditCategoriesFromCloud, saveAuditCategoriesToCloud } from "./services/audit-structure-cloud";
+import { getStoredAuditCategories, resetAuditCategories, saveAuditCategories } from "./services/audit-structure";
 import { 
   LOCATIONS, 
-  AUDITORS, 
-  STAFF, 
-  AUDIT_QUESTIONS 
+  AUDITORS
 } from "./constants";
-import { Role, AuditItem, AuditSession, Location } from "./types";
+import { Role, AuditItem, AuditSession, Location, AuditCategory, AuditStructureScope } from "./types";
 import { 
   auth, 
   db, 
@@ -141,6 +136,8 @@ interface AuditItemRowProps {
   question: string;
   index: number;
   item?: AuditItem;
+  required?: boolean;
+  showStructuredQuestion?: boolean;
   onStatusToggle: (status: "pass" | "fail" | "na") => void;
   onCommentUpdate: (comment: string) => void;
 }
@@ -203,10 +200,21 @@ const AuditItemRow: React.FC<AuditItemRowProps> = ({
   question, 
   index, 
   item, 
+  required = true,
+  showStructuredQuestion = false,
   onStatusToggle, 
   onCommentUpdate 
 }) => {
   const [showComment, setShowComment] = useState(false);
+  const separatorIndex = question.indexOf(":");
+  const hasStructuredCopy = showStructuredQuestion && separatorIndex > -1;
+  const questionTitle = hasStructuredCopy ? question.slice(0, separatorIndex).trim() : question;
+  const questionHint = hasStructuredCopy ? question.slice(separatorIndex + 1).trim() : "";
+  const isOrdersStyle = showStructuredQuestion;
+  const currentStatusLabel =
+    item?.status === "pass" ? "Cumple" :
+    item?.status === "fail" ? "No cumple" :
+    item?.status === "na" ? "N/A" : "Pendiente";
 
   return (
     <motion.div 
@@ -214,85 +222,129 @@ const AuditItemRow: React.FC<AuditItemRowProps> = ({
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: index * 0.05 }}
       className={cn(
-        "bg-white rounded-3xl p-6 shadow-sm border transition-all duration-300 space-y-4",
-        item?.status ? "border-gray-200" : "border-gray-100 ring-1 ring-gray-50"
+        "border transition-all duration-300 space-y-3",
+        isOrdersStyle
+          ? "bg-white rounded-[1.5rem] p-4 shadow-[0_16px_40px_rgba(15,23,42,0.05)] border-slate-200/80"
+          : "bg-white rounded-3xl p-6 shadow-sm",
+        item?.status
+          ? (isOrdersStyle ? "border-slate-300" : "border-gray-200")
+          : (isOrdersStyle ? "border-slate-200 ring-1 ring-slate-100" : "border-gray-100 ring-1 ring-gray-50")
       )}
     >
       <div className="flex justify-between items-start gap-4">
         <div className="space-y-1 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-black text-gray-400 bg-gray-100 px-2 py-0.5 rounded-md uppercase tracking-tighter">
-              #{index + 1}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={cn(
+              "text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.18em]",
+              isOrdersStyle ? "bg-slate-900 text-white" : "text-gray-400 bg-gray-100"
+            )}>
+              Item {String(index + 1).padStart(2, "0")}
             </span>
-            {item?.status && (
-              <motion.span 
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-                className={cn(
-                  "w-2 h-2 rounded-full",
-                  item.status === "pass" ? "bg-green-500" : 
-                  item.status === "fail" ? "bg-red-500" : "bg-gray-400"
-                )}
-              />
+            <span className={cn(
+              "text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.16em] border",
+              item?.status === "pass" && "border-emerald-200 bg-emerald-50 text-emerald-700",
+              item?.status === "fail" && "border-red-200 bg-red-50 text-red-700",
+              item?.status === "na" && "border-slate-200 bg-slate-100 text-slate-600",
+              !item?.status && "border-amber-200 bg-amber-50 text-amber-700"
+            )}>
+              {currentStatusLabel}
+            </span>
+            <span className={cn(
+              "text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.16em] border",
+              required
+                ? "border-blue-200 bg-blue-50 text-blue-700"
+                : "border-slate-200 bg-slate-50 text-slate-500"
+            )}>
+              {required ? "Obligatorio" : "Opcional"}
+            </span>
+          </div>
+          <div className="space-y-1.5">
+            <p className={cn(
+              "leading-snug",
+              isOrdersStyle ? "font-black text-slate-900 text-[0.95rem] md:text-base tracking-[-0.02em]" : "font-bold text-gray-800 text-sm md:text-base"
+            )}>
+              {questionTitle}
+            </p>
+            {questionHint && (
+              <p className={cn(
+                "text-[11px] leading-snug rounded-xl px-3 py-2 border",
+                isOrdersStyle
+                  ? "text-slate-600 bg-slate-50 border-slate-200"
+                  : "text-gray-500 bg-slate-50 border-slate-100"
+              )}>
+                {questionHint}
+              </p>
             )}
           </div>
-          <p className="font-bold text-gray-800 leading-snug text-sm md:text-base">{question}</p>
         </div>
       </div>
       
-      <div className="grid grid-cols-3 gap-2">
+      <div className={cn(
+        isOrdersStyle ? "grid grid-cols-3 gap-2.5" : "grid grid-cols-3 gap-2"
+      )}>
         <button
           onClick={() => onStatusToggle("pass")}
           className={cn(
-            "flex flex-col items-center justify-center gap-1.5 py-3.5 rounded-2xl border-2 transition-all active:scale-95",
+            "flex items-center justify-center gap-2 rounded-2xl border-2 transition-all active:scale-95",
+            isOrdersStyle ? "py-2.5 px-2 min-h-[46px]" : "flex-col py-3.5",
             item?.status === "pass" 
-              ? "bg-green-500 border-green-500 text-white shadow-lg shadow-green-100" 
-              : "bg-white border-gray-100 text-gray-400 hover:border-green-200 hover:text-green-500"
+              ? (isOrdersStyle ? "bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-100" : "bg-green-500 border-green-500 text-white shadow-lg shadow-green-100")
+              : (isOrdersStyle ? "bg-white border-slate-200 text-slate-500 hover:border-emerald-300 hover:text-emerald-700" : "bg-white border-gray-100 text-gray-400 hover:border-green-200 hover:text-green-500")
           )}
         >
-          <CheckCircle2 className={cn("w-5 h-5", item?.status === "pass" ? "text-white" : "")} />
+          <CheckCircle2 className={cn("w-4 h-4", item?.status === "pass" ? "text-white" : "")} />
           <span className="text-[10px] font-black uppercase tracking-tight">Cumple</span>
         </button>
         <button
           onClick={() => onStatusToggle("fail")}
           className={cn(
-            "flex flex-col items-center justify-center gap-1.5 py-3.5 rounded-2xl border-2 transition-all active:scale-95",
+            "flex items-center justify-center gap-2 rounded-2xl border-2 transition-all active:scale-95",
+            isOrdersStyle ? "py-2.5 px-2 min-h-[46px]" : "flex-col py-3.5",
             item?.status === "fail" 
-              ? "bg-red-500 border-red-500 text-white shadow-lg shadow-red-100" 
-              : "bg-white border-gray-100 text-gray-400 hover:border-red-200 hover:text-red-500"
+              ? (isOrdersStyle ? "bg-red-600 border-red-600 text-white shadow-lg shadow-red-100" : "bg-red-500 border-red-500 text-white shadow-lg shadow-red-100")
+              : (isOrdersStyle ? "bg-white border-slate-200 text-slate-500 hover:border-red-300 hover:text-red-700" : "bg-white border-gray-100 text-gray-400 hover:border-red-200 hover:text-red-500")
           )}
         >
-          <XCircle className={cn("w-5 h-5", item?.status === "fail" ? "text-white" : "")} />
+          <XCircle className={cn("w-4 h-4", item?.status === "fail" ? "text-white" : "")} />
           <span className="text-[10px] font-black uppercase tracking-tight">No Cumple</span>
         </button>
         <button
           onClick={() => onStatusToggle("na")}
           className={cn(
-            "flex flex-col items-center justify-center gap-1.5 py-3.5 rounded-2xl border-2 transition-all active:scale-95",
+            "flex items-center justify-center gap-2 rounded-2xl border-2 transition-all active:scale-95",
+            isOrdersStyle ? "py-2.5 px-2 min-h-[46px]" : "flex-col py-3.5",
             item?.status === "na" 
-              ? "bg-gray-800 border-gray-800 text-white shadow-lg shadow-gray-200" 
-              : "bg-white border-gray-100 text-gray-400 hover:border-gray-300 hover:text-gray-600"
+              ? (isOrdersStyle ? "bg-slate-700 border-slate-700 text-white shadow-lg shadow-slate-200" : "bg-gray-800 border-gray-800 text-white shadow-lg shadow-gray-200")
+              : (isOrdersStyle ? "bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-700" : "bg-white border-gray-100 text-gray-400 hover:border-gray-300 hover:text-gray-600")
           )}
         >
-          <MinusCircle className={cn("w-5 h-5", item?.status === "na" ? "text-white" : "")} />
+          <MinusCircle className={cn("w-4 h-4", item?.status === "na" ? "text-white" : "")} />
           <span className="text-[10px] font-black uppercase tracking-tight">N/A</span>
         </button>
       </div>
 
-      <div className="flex gap-2 pt-2">
+      <div className={cn(
+        "flex gap-2 pt-1",
+        isOrdersStyle && "border-t border-slate-100 pt-3"
+      )}>
         <button 
           onClick={() => setShowComment(!showComment)}
           className={cn(
-            "flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all",
+            "flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all",
             item?.comment || showComment 
-              ? "bg-blue-50 text-blue-600 ring-1 ring-blue-100" 
-              : "bg-gray-50 text-gray-400 hover:bg-gray-100"
+              ? (isOrdersStyle ? "bg-slate-900 text-white ring-1 ring-slate-900" : "bg-blue-50 text-blue-600 ring-1 ring-blue-100")
+              : (isOrdersStyle ? "bg-slate-50 text-slate-500 hover:bg-slate-100 border border-slate-200" : "bg-gray-50 text-gray-400 hover:bg-gray-100")
           )}
         >
           <History className="w-3.5 h-3.5" />
           {item?.comment ? "Ver Observación" : "Agregar Nota"}
         </button>
-        <button className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-gray-50 text-gray-400 text-[10px] font-bold uppercase tracking-wider hover:bg-gray-100 transition-all">
+        <button className={cn(
+          "flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all",
+          isOrdersStyle
+            ? "bg-slate-50 text-slate-400 border border-slate-200 hover:bg-slate-100"
+            : "bg-gray-50 text-gray-400 hover:bg-gray-100"
+        )}>
           <Camera className="w-3.5 h-3.5" />
           Adjuntar Foto
         </button>
@@ -306,12 +358,15 @@ const AuditItemRow: React.FC<AuditItemRowProps> = ({
             exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
           >
-            <div className="pt-2">
+            <div className="pt-1">
               <textarea 
                 value={item?.comment || ""}
                 onChange={(e) => onCommentUpdate(e.target.value)}
                 placeholder="Escribe aquí las observaciones para este ítem..."
-                className="w-full p-4 bg-gray-50 border-2 border-gray-100 rounded-2xl text-xs focus:ring-0 focus:border-blue-200 h-24 resize-none transition-all"
+                className={cn(
+                  "w-full bg-gray-50 border-2 border-gray-100 rounded-2xl text-xs focus:ring-0 focus:border-blue-200 resize-none transition-all",
+                  isOrdersStyle ? "p-3 h-20" : "p-4 h-24"
+                )}
               />
             </div>
           </motion.div>
@@ -322,9 +377,18 @@ const AuditItemRow: React.FC<AuditItemRowProps> = ({
 };
 
 function AuditApp() {
+  const appTitle = import.meta.env.VITE_APP_TITLE?.trim() || "Auditoría OR Postventa VW";
+  const envWebhookUrl = import.meta.env.VITE_APPS_SCRIPT_URL?.trim() || "";
+  const envSheetCsvUrl = import.meta.env.VITE_SHEET_CSV_URL?.trim() || "";
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [view, setView] = useState<"dashboard" | "home" | "setup" | "audit" | "history" | "reports">("dashboard");
+  const [selectedStructureScope, setSelectedStructureScope] = useState<AuditStructureScope>("global");
+  const [auditCategoryScopes, setAuditCategoryScopes] = useState<Record<AuditStructureScope, AuditCategory[]>>(() => ({
+    global: getStoredAuditCategories("global"),
+    Salta: getStoredAuditCategories("Salta"),
+    Jujuy: getStoredAuditCategories("Jujuy"),
+  }));
   const [isSyncing, setIsSyncing] = useState(false);
   const [session, setSession] = useState<Partial<AuditSession>>({
     date: new Date().toISOString().split("T")[0],
@@ -335,14 +399,146 @@ function AuditApp() {
   const [history, setHistory] = useState<AuditSession[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedAudit, setSelectedAudit] = useState<AuditSession | null>(null);
+  const [selectedStructureCategoryId, setSelectedStructureCategoryId] = useState("");
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [newCategoryStaff, setNewCategoryStaff] = useState("");
+  const [newItemText, setNewItemText] = useState("");
+  const [newItemRequired, setNewItemRequired] = useState(true);
+  const [isLoadingStructureFromCloud, setIsLoadingStructureFromCloud] = useState(false);
+  const [isSavingStructureToCloud, setIsSavingStructureToCloud] = useState(false);
+  const [structureStorageLabel, setStructureStorageLabel] = useState<"local" | "cloud">("local");
+  const [setupStep, setSetupStep] = useState<1 | 2 | 3>(1);
+  const [reportsPanel, setReportsPanel] = useState<"kpis" | "structure" | "integrations">("kpis");
+  const [historyPanel, setHistoryPanel] = useState<"records" | "exports">("records");
   const [reportFilter, setReportFilter] = useState({
-    role: "Ordenes" as Role,
+    role: getStoredAuditCategories("global")[0]?.name || "Ordenes",
     staff: "",
     month: new Date().toISOString().slice(0, 7) // YYYY-MM
   });
-  const [webhookUrl, setWebhookUrl] = useState<string>(localStorage.getItem("webhookUrl") || "https://script.google.com/macros/s/AKfycbxUbxbHYP4UIiyajM_6IVNfsFMgXEpxsvMmwyisqoo4_8lBxNzcMiPyXftxheyh7Q04/exec");
+  const [webhookUrl, setWebhookUrl] = useState<string>(localStorage.getItem("webhookUrl") || envWebhookUrl);
+  const [sheetCsvUrl, setSheetCsvUrl] = useState<string>(localStorage.getItem("sheetCsvUrl") || envSheetCsvUrl);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isSendingToSheet, setIsSendingToSheet] = useState(false);
+
+  const sessionItems = session.items ?? [];
+  const ordersTargetPerAdvisor = 10;
+  const isSheetSyncConfigured = webhookUrl.trim().length > 0;
+  const isHistorySyncConfigured = sheetCsvUrl.trim().length > 0;
+  const auditCategories = auditCategoryScopes[selectedStructureScope] ?? auditCategoryScopes.global;
+  const activeAuditCategories = (session.location ? auditCategoryScopes[session.location] : null) ?? auditCategoryScopes.global;
+  const selectedAuditCategory = selectedRole
+    ? activeAuditCategories.find((category) => category.name === selectedRole) ?? null
+    : null;
+  const selectedAuditItems = selectedAuditCategory?.items ?? [];
+  const selectedAuditStaffOptions = selectedAuditCategory?.staffOptions ?? [];
+  const selectedAuditorOption = AUDITORS.find((auditor) => auditor.id === session.auditorId) ?? null;
+  const selectedStructureCategory = auditCategories.find((category) => category.id === selectedStructureCategoryId) ?? null;
+  const reportCategoryItems = Array.from(new Map(
+    Object.values(auditCategoryScopes)
+      .flatMap((categories) => categories)
+      .filter((category) => category.name === reportFilter.role)
+      .map((category) => [category.id, category])
+  ).values())[0]?.items ?? [];
+  const allStaffOptions = Array.from(new Set(Object.values(auditCategoryScopes).flatMap((categories) => categories.flatMap((category) => category.staffOptions))));
+  const configuredCategoryCount = Array.from(new Set(Object.values(auditCategoryScopes).flatMap((categories) => categories.map((category) => category.name)))).length;
+  const requiredPendingCount = selectedAuditItems.filter(
+    (auditItem) => auditItem.required && !sessionItems.some((item) => item.question === auditItem.text && item.status)
+  ).length;
+  const optionalPendingCount = selectedAuditItems.filter(
+    (auditItem) => !auditItem.required && !sessionItems.some((item) => item.question === auditItem.text && item.status)
+  ).length;
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  const monthlyAudits = history.filter((audit) => audit.date?.startsWith(currentMonth));
+  const averageScore = Math.round(history.reduce((acc, audit) => acc + audit.totalScore, 0) / (history.length || 1));
+  const bestAuditScore = history.length > 0 ? Math.max(...history.map((audit) => audit.totalScore)) : 0;
+  const activeLocations = Array.from(new Set(history.map((audit) => audit.location).filter(Boolean))).length;
+  const recentAverageScore = Math.round(monthlyAudits.reduce((acc, audit) => acc + audit.totalScore, 0) / (monthlyAudits.length || 1));
+  const operatingStatus = user ? "Operativo" : "Acceso pendiente";
+  const controlPanels: Array<{
+    id: "kpis" | "structure" | "integrations";
+    label: string;
+    description: string;
+    icon: typeof BarChart3;
+  }> = [
+    {
+      id: "kpis",
+      label: "Indicadores",
+      description: "Seguimiento mensual, matriz y tendencias.",
+      icon: BarChart3,
+    },
+    {
+      id: "structure",
+      label: "Estructura",
+      description: "Categorías, personal auditable e ítems.",
+      icon: Settings,
+    },
+    {
+      id: "integrations",
+      label: "Integraciones",
+      description: "Apps Script, Sheets y parámetros externos.",
+      icon: ShieldCheck,
+    },
+  ];
+  const activeControlPanel = controlPanels.find((panel) => panel.id === reportsPanel) ?? controlPanels[0];
+  const activeViewLabel =
+    view === "dashboard"
+      ? "Inicio"
+      : view === "history"
+        ? "Historial"
+        : view === "reports"
+          ? "Control"
+          : view === "setup"
+            ? "Configuración"
+            : view === "audit"
+              ? "Auditoría"
+              : "Nueva auditoría";
+  const setupCompletionCount = [Boolean(session.auditorId), Boolean(session.location), Boolean(session.date)].filter(Boolean).length;
+  const operationalModules = [
+    {
+      title: "Nueva auditoría",
+      description: "Ir directo al alta de una revisión y asignar responsable.",
+      icon: Plus,
+      tone: "blue",
+      action: () => startNewAudit(),
+    },
+    {
+      title: "Historial",
+      description: "Consultar auditorías cerradas y revisar el detalle operativo.",
+      icon: History,
+      tone: "slate",
+      action: () => setView("history"),
+    },
+    {
+      title: "Indicadores",
+      description: "Entrar al tablero de control y medir cumplimiento.",
+      icon: TrendingUp,
+      tone: "emerald",
+      action: () => {
+        setReportsPanel("kpis");
+        setView("reports");
+      },
+    },
+    {
+      title: "Estructura",
+      description: "Editar plantillas, categorías y perfiles por sucursal.",
+      icon: Settings,
+      tone: "amber",
+      action: () => {
+        setReportsPanel("structure");
+        setView("reports");
+      },
+    },
+    {
+      title: "Integraciones",
+      description: "Centralizar conectores y sincronización externa.",
+      icon: ShieldCheck,
+      tone: "violet",
+      action: () => {
+        setReportsPanel("integrations");
+        setView("reports");
+      },
+    },
+  ];
 
   // Mock data for charts if no history exists
   const chartData = history.length > 0 
@@ -362,6 +558,288 @@ function AuditApp() {
     { name: 'Lavadero', value: 88, color: '#10B981' },
     { name: 'Ordenes', value: 95, color: '#F59E0B' },
   ];
+
+  const recentAudits = history.slice(0, 3);
+  const filteredHistory = history.filter((item) =>
+    item.staffName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    item.orderNumber?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    item.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    item.items[0]?.category.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+  const filteredReportSessions = history.filter((sessionItem) =>
+    sessionItem.role === reportFilter.role &&
+    (!reportFilter.staff || sessionItem.staffName === reportFilter.staff) &&
+    sessionItem.date.startsWith(reportFilter.month)
+  );
+  const auditedOrdersForSelectedStaff = selectedRole === "Ordenes" && selectedStaff
+    ? history.filter((item) => item.role === "Ordenes" && item.staffName === selectedStaff).length
+    : 0;
+  const auditedOrdersProgress = Math.min(auditedOrdersForSelectedStaff / ordersTargetPerAdvisor, 1) * 100;
+  const auditedOrdersRemaining = Math.max(ordersTargetPerAdvisor - auditedOrdersForSelectedStaff, 0);
+  const selectedHistoryAudit = view === "history" ? selectedAudit : null;
+  const historyAverageScore = Math.round(filteredHistory.reduce((acc, item) => acc + item.totalScore, 0) / (filteredHistory.length || 1));
+  const nonCompliantAudits = filteredHistory.filter((item) => item.totalScore < 90).length;
+  const latestHistoryItem = filteredHistory[0] ?? null;
+  const nextPendingItemIndex = selectedRole
+    ? selectedAuditItems.findIndex(
+        (auditItem) => !sessionItems.some((item) => item.question === auditItem.text && item.status)
+      )
+    : -1;
+
+  useEffect(() => {
+    if (auditCategories.length === 0) {
+      setSelectedStructureCategoryId("");
+      return;
+    }
+
+    if (!selectedStructureCategoryId || !auditCategories.some((category) => category.id === selectedStructureCategoryId)) {
+      setSelectedStructureCategoryId(auditCategories[0].id);
+    }
+
+    const allCategoryNames = Array.from(new Set(Object.values(auditCategoryScopes).flatMap((categories) => categories.map((category) => category.name))));
+
+    if (!allCategoryNames.includes(reportFilter.role)) {
+      setReportFilter((current) => ({ ...current, role: allCategoryNames[0] || current.role }));
+    }
+
+    if (selectedRole && !activeAuditCategories.some((category) => category.name === selectedRole)) {
+      setSelectedRole(null);
+      setSelectedStaff("");
+    }
+  }, [activeAuditCategories, auditCategories, auditCategoryScopes, reportFilter.role, selectedRole, selectedStructureCategoryId]);
+
+  useEffect(() => {
+    if (!isAuthReady || !user) {
+      setStructureStorageLabel("local");
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadStructure = async () => {
+      setIsLoadingStructureFromCloud(true);
+      try {
+        const scopeResults = await Promise.all([
+          loadAuditCategoriesFromCloud("global"),
+          loadAuditCategoriesFromCloud("Salta"),
+          loadAuditCategoriesFromCloud("Jujuy"),
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        const nextScopes: Record<AuditStructureScope, AuditCategory[]> = {
+          global: scopeResults[0] ?? getStoredAuditCategories("global"),
+          Salta: scopeResults[1] ?? getStoredAuditCategories("Salta"),
+          Jujuy: scopeResults[2] ?? getStoredAuditCategories("Jujuy"),
+        };
+
+        setAuditCategoryScopes(nextScopes);
+        saveAuditCategories(nextScopes.global, "global");
+        saveAuditCategories(nextScopes.Salta, "Salta");
+        saveAuditCategories(nextScopes.Jujuy, "Jujuy");
+        if (scopeResults.some(Boolean)) {
+          setStructureStorageLabel("cloud");
+        }
+      } catch (error) {
+        console.error("Load structure from cloud failed:", error);
+      } finally {
+        if (!cancelled) {
+          setIsLoadingStructureFromCloud(false);
+        }
+      }
+    };
+
+    loadStructure();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthReady, user]);
+
+  useEffect(() => {
+    if (view !== "history") {
+      return;
+    }
+
+    if (filteredHistory.length === 0) {
+      if (selectedAudit) {
+        setSelectedAudit(null);
+      }
+      return;
+    }
+
+    if (!selectedAudit || !filteredHistory.some((item) => item.id === selectedAudit.id)) {
+      setSelectedAudit(filteredHistory[0]);
+    }
+  }, [filteredHistory, selectedAudit, view]);
+
+  const persistAuditCategories = (nextCategories: AuditCategory[]) => {
+    setAuditCategoryScopes((current) => ({
+      ...current,
+      [selectedStructureScope]: nextCategories,
+    }));
+    saveAuditCategories(nextCategories, selectedStructureScope);
+    setStructureStorageLabel("local");
+  };
+
+  const updateCategory = (categoryId: string, updater: (category: AuditCategory) => AuditCategory) => {
+    const currentCategory = auditCategories.find((category) => category.id === categoryId);
+    if (!currentCategory) return;
+
+    const nextCategory = updater(currentCategory);
+    const nextCategories = auditCategories.map((category) =>
+      category.id === categoryId ? nextCategory : category
+    );
+
+    if (selectedRole === currentCategory.name && nextCategory.name !== currentCategory.name) {
+      setSelectedRole(nextCategory.name);
+    }
+
+    if (reportFilter.role === currentCategory.name && nextCategory.name !== currentCategory.name) {
+      setReportFilter((current) => ({ ...current, role: nextCategory.name }));
+    }
+
+    persistAuditCategories(nextCategories);
+  };
+
+  const handleAddCategory = () => {
+    const trimmedName = newCategoryName.trim();
+    if (!trimmedName) return;
+
+    if (auditCategories.some((category) => category.name.toLowerCase() === trimmedName.toLowerCase())) {
+      alert("Ya existe una categoría con ese nombre.");
+      return;
+    }
+
+    const newCategory: AuditCategory = {
+      id: createClientId(),
+      name: trimmedName,
+      staffOptions: newCategoryStaff.split(",").map((value) => value.trim()).filter(Boolean),
+      items: [],
+    };
+
+    const nextCategories = [...auditCategories, newCategory];
+    persistAuditCategories(nextCategories);
+    setSelectedStructureCategoryId(newCategory.id);
+    setNewCategoryName("");
+    setNewCategoryStaff("");
+  };
+
+  const handleDeleteCategory = (categoryId: string) => {
+    if (auditCategories.length === 1) {
+      alert("Necesitás al menos una categoría activa.");
+      return;
+    }
+
+    const categoryToDelete = auditCategories.find((category) => category.id === categoryId);
+    if (!categoryToDelete) return;
+
+    const nextCategories = auditCategories.filter((category) => category.id !== categoryId);
+    persistAuditCategories(nextCategories);
+
+    if (selectedStructureCategoryId === categoryId) {
+      setSelectedStructureCategoryId(nextCategories[0]?.id || "");
+    }
+
+    if (selectedRole === categoryToDelete.name) {
+      setSelectedRole(null);
+      setSelectedStaff("");
+    }
+
+    if (reportFilter.role === categoryToDelete.name) {
+      setReportFilter((current) => ({ ...current, role: nextCategories[0]?.name || current.role }));
+    }
+  };
+
+  const handleAddItem = () => {
+    if (!selectedStructureCategory) return;
+
+    const trimmedText = newItemText.trim();
+    if (!trimmedText) return;
+
+    updateCategory(selectedStructureCategory.id, (category) => ({
+      ...category,
+      items: [
+        ...category.items,
+        {
+          id: createClientId(),
+          text: trimmedText,
+          required: newItemRequired,
+        },
+      ],
+    }));
+
+    setNewItemText("");
+    setNewItemRequired(true);
+  };
+
+  const handleResetStructure = () => {
+    const defaults = resetAuditCategories(selectedStructureScope);
+    setAuditCategoryScopes((current) => ({
+      ...current,
+      [selectedStructureScope]: defaults,
+    }));
+    setSelectedStructureCategoryId(defaults[0]?.id || "");
+    setReportFilter((current) => ({ ...current, role: defaults[0]?.name || current.role }));
+    setStructureStorageLabel("local");
+    alert("Estructura restablecida a la configuración inicial.");
+  };
+
+  const handleLoadStructureFromCloud = async () => {
+    if (!user) {
+      alert("Iniciá sesión para cargar la estructura compartida desde Firestore.");
+      return;
+    }
+
+    setIsLoadingStructureFromCloud(true);
+    try {
+      const cloudCategories = await loadAuditCategoriesFromCloud(selectedStructureScope);
+      if (!cloudCategories) {
+        alert("Todavía no existe una estructura guardada en Firestore.");
+        return;
+      }
+
+      setAuditCategoryScopes((current) => ({
+        ...current,
+        [selectedStructureScope]: cloudCategories,
+      }));
+      saveAuditCategories(cloudCategories, selectedStructureScope);
+      setStructureStorageLabel("cloud");
+      alert("Estructura cargada desde Firestore.");
+    } catch (error) {
+      console.error("Manual cloud load failed:", error);
+      alert("No se pudo cargar la estructura desde Firestore.");
+    } finally {
+      setIsLoadingStructureFromCloud(false);
+    }
+  };
+
+  const handleSaveStructureToCloud = async () => {
+    if (!user) {
+      alert("Iniciá sesión para guardar la estructura en Firestore.");
+      return;
+    }
+
+    setIsSavingStructureToCloud(true);
+    try {
+      await saveAuditCategoriesToCloud(auditCategories, selectedStructureScope, user.email);
+      setStructureStorageLabel("cloud");
+      alert("Estructura guardada en Firestore.");
+    } catch (error) {
+      console.error("Save structure to cloud failed:", error);
+      alert("No se pudo guardar la estructura en Firestore.");
+    } finally {
+      setIsSavingStructureToCloud(false);
+    }
+  };
+
+  const saveIntegrationSettings = () => {
+    localStorage.setItem("webhookUrl", webhookUrl.trim());
+    localStorage.setItem("sheetCsvUrl", sheetCsvUrl.trim());
+    alert("Configuración guardada correctamente.");
+  };
 
   const exportToCSV = () => {
     if (history.length === 0) return;
@@ -438,7 +916,7 @@ function AuditApp() {
   const handleLogout = async () => {
     try {
       await signOut(auth);
-      setView("home");
+      setView("dashboard");
     } catch (error) {
       console.error("Logout failed:", error);
     }
@@ -458,15 +936,32 @@ function AuditApp() {
 
   const startNewAudit = () => {
     setSession({
-      id: crypto.randomUUID(),
+      id: createClientId(),
       date: new Date().toISOString().split("T")[0],
       items: []
     });
+    setSetupStep(1);
+    setSelectedRole(null);
+    setSelectedStaff("");
     setView("setup");
   };
 
   const handleSetupSubmit = () => {
-    if (session.auditorId && session.location) {
+    if (setupStep === 1) {
+      if (session.auditorId) {
+        setSetupStep(2);
+      }
+      return;
+    }
+
+    if (setupStep === 2) {
+      if (session.location) {
+        setSetupStep(3);
+      }
+      return;
+    }
+
+    if (session.auditorId && session.location && session.date) {
       setView("audit");
     }
   };
@@ -482,68 +977,73 @@ function AuditApp() {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
 
   const handleAuditSubmit = () => {
-    if (!selectedRole) return;
+    if (!selectedRole || !selectedAuditCategory) return;
+
+    if (requiredPendingCount > 0) {
+      alert(`Faltan ${requiredPendingCount} ítems obligatorios por responder.`);
+      return;
+    }
     
-    if (session.items.length < AUDIT_QUESTIONS[selectedRole].length) {
+    if (optionalPendingCount > 0) {
       setShowConfirmModal(true);
       return;
     }
     submitAudit();
   };
 
-  const submitAudit = () => {
-    // Validar que si el rol es "Ordenes", debe tener número de OR
-    if (selectedRole === "Ordenes" && !session.orderNumber) {
-      alert("Por favor, ingresa el Número de Orden (OR) para continuar.");
-      return;
-    }
+  const resetAuditFlow = () => {
+    setIsSendingToSheet(false);
+    setView("dashboard");
+    setSelectedRole(null);
+    setSelectedStaff("");
+  };
 
-    if (session.items && session.items.length > 0) {
-      setIsSendingToSheet(true);
-      
-      const validItems = session.items.filter(i => i.status !== "na");
-      const totalScore = validItems.length > 0 
-        ? (session.items.filter(i => i.status === "pass").length / validItems.length) * 100 
-        : 0;
-      
-      const completeSession: AuditSession = {
-        ...session as AuditSession,
-        staffName: selectedStaff,
-        role: selectedRole!,
-        totalScore: Math.round(totalScore)
-      };
-      
-      saveToFirestore(completeSession);
-      
-      // Sync with Google Sheets if webhook is configured
-      if (webhookUrl) {
-        fetch(webhookUrl, {
-          method: "POST",
-          mode: "no-cors",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(completeSession)
-        })
-        .then(() => {
-          alert("✅ Auditoría enviada al Sheet correctamente");
-          setIsSendingToSheet(false);
-          setView("home");
-          setSelectedRole(null);
-          setSelectedStaff("");
-        })
-        .catch(err => {
-          console.error("Sync error:", err);
-          alert("⚠️ Error al sincronizar con el Sheet. Los datos se guardaron localmente.");
-          setIsSendingToSheet(false);
-          setView("home");
-          setSelectedRole(null);
-          setSelectedStaff("");
+  const submitAudit = async () => {
+    if (sessionItems.length === 0) return;
+
+    setIsSendingToSheet(true);
+
+    const validItems = sessionItems.filter(i => i.status !== "na");
+    const totalScore = validItems.length > 0 
+      ? (sessionItems.filter(i => i.status === "pass").length / validItems.length) * 100 
+      : 0;
+
+    const completeSession: AuditSession = {
+      ...session as AuditSession,
+      staffName: selectedStaff,
+      role: selectedRole!,
+      totalScore: Math.round(totalScore)
+    };
+
+    const auditorName = AUDITORS.find((auditor) => auditor.id === completeSession.auditorId)?.name || "N/A";
+
+    try {
+      await saveToFirestore(completeSession);
+
+      if (isSheetSyncConfigured) {
+        const payload = buildAuditSyncPayload({
+          session: completeSession,
+          auditorName,
+          submittedByEmail: user?.email,
         });
+
+        await sendAuditToWebhook(webhookUrl, payload);
+        alert("✅ Auditoría guardada en Firestore y enviada a Google Sheets");
       } else {
-        setIsSendingToSheet(false);
-        setView("home");
-        setSelectedRole(null);
-        setSelectedStaff("");
+        alert("✅ Auditoría guardada en Firestore");
       }
+
+      resetAuditFlow();
+    } catch (error) {
+      console.error("Submit audit failed:", error);
+
+      if (isSheetSyncConfigured) {
+        alert("⚠️ La auditoría se intentó guardar, pero falló la sincronización con Google Sheets. Revisá la URL del Apps Script.");
+      } else {
+        alert("⚠️ No se pudo guardar la auditoría. Verificá tu acceso a Firebase y reintentá.");
+      }
+
+      setIsSendingToSheet(false);
     }
   };
 
@@ -555,7 +1055,7 @@ function AuditApp() {
       newItems[existingIndex] = { ...newItems[existingIndex], status };
     } else {
       newItems.push({
-        id: crypto.randomUUID(),
+        id: createClientId(),
         question,
         category: selectedRole!,
         status,
@@ -574,7 +1074,7 @@ function AuditApp() {
       newItems[existingIndex] = { ...newItems[existingIndex], comment };
     } else {
       newItems.push({
-        id: crypto.randomUUID(),
+        id: createClientId(),
         question,
         category: selectedRole!,
         status: "na",
@@ -586,9 +1086,14 @@ function AuditApp() {
   };
 
   const syncData = async () => {
+    if (!isHistorySyncConfigured) {
+      alert("Configura la URL pública CSV de Google Sheets para sincronizar datos.");
+      return;
+    }
+
     setIsSyncing(true);
     try {
-      const response = await fetch("https://docs.google.com/spreadsheets/d/e/2PACX-1vTEM5qFE2lZaFjep7bEG2uAlP4QcALYW2F7HZGqc-SEVk0_-VG6ojhZy3N1LcveK9qYhC3dOMZYtiWS/pub?output=csv");
+      const response = await fetch(sheetCsvUrl);
       const csvText = await response.text();
       Papa.parse(csvText, {
         complete: (results) => {
@@ -604,17 +1109,17 @@ function AuditApp() {
 
   if (!isAuthReady) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#F5F5F5]">
+      <div className="min-h-screen bg-gradient-to-br from-[#F5F7FA] via-[#EEF3F8] to-[#E6EDF6] flex items-center justify-center">
         <div className="w-8 h-8 border-4 border-gray-200 border-t-[#1A1A1A] rounded-full animate-spin" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-[#1E293B] font-sans flex overflow-hidden">
+    <div className="min-h-screen bg-gradient-to-br from-[#F5F7FA] via-[#EEF3F8] to-[#E6EDF6] lg:flex">
       {/* Sidebar - Desktop Only */}
       <aside className={cn(
-        "hidden flex-col w-72 bg-slate-900 text-white h-screen sticky top-0 z-50 shadow-2xl transition-all duration-500",
+        "hidden h-[100dvh] w-72 shrink-0 flex-col overflow-hidden bg-slate-900 text-white shadow-2xl transition-all duration-500 lg:sticky lg:top-0 z-50",
         (view === "dashboard" || view === "history" || view === "reports") ? "lg:flex" : "lg:hidden"
       )}>
         <div className="p-8 flex items-center gap-3">
@@ -622,34 +1127,48 @@ function AuditApp() {
             <ClipboardCheck className="text-white w-6 h-6" />
           </div>
           <div>
-            <h1 className="font-black text-lg tracking-tight leading-none">AUDIT<span className="text-blue-500">PRO</span></h1>
+            <h1 className="font-black text-lg tracking-tight leading-none">{appTitle}</h1>
             <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Postventa v2.0</p>
           </div>
         </div>
 
-        <nav className="flex-1 px-4 py-4 space-y-2">
+        <nav className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-2 sidebar-scroll">
+          <div className="px-4 pb-2">
+            <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Operación</p>
+          </div>
           {[
-            { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+            { id: "dashboard", label: "Inicio", icon: LayoutDashboard },
             { id: "home", label: "Nueva Auditoría", icon: Plus },
             { id: "history", label: "Historial", icon: History },
-            { id: "reports", label: "Reportes KPI", icon: BarChart3 },
+            { id: "reports", label: "Control", icon: BarChart3 },
           ].map((item) => (
             <button
               key={item.id}
-              onClick={() => setView(item.id as any)}
+              onClick={() => {
+                if (item.id === "home") {
+                  startNewAudit();
+                  return;
+                }
+
+                if (item.id === "reports") {
+                  setReportsPanel("kpis");
+                }
+
+                setView(item.id as any);
+              }}
               className={cn(
                 "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm transition-all group",
-                view === item.id 
+                (item.id === "home" ? (view === "setup" || view === "audit") : view === item.id)
                   ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" 
                   : "text-slate-400 hover:text-white hover:bg-slate-800"
               )}
             >
               <item.icon className={cn(
                 "w-5 h-5 transition-transform group-hover:scale-110",
-                view === item.id ? "text-white" : "text-slate-500"
+                (item.id === "home" ? (view === "setup" || view === "audit") : view === item.id) ? "text-white" : "text-slate-500"
               )} />
               {item.label}
-              {view === item.id && (
+              {(item.id === "home" ? (view === "setup" || view === "audit") : view === item.id) && (
                 <motion.div 
                   layoutId="activeTab"
                   className="ml-auto w-1.5 h-1.5 bg-white rounded-full"
@@ -659,20 +1178,61 @@ function AuditApp() {
           ))}
           
           <div className="pt-8 pb-4 px-4">
-            <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Administración</p>
+            <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Suite de control</p>
           </div>
-          
+
+          <button
+            onClick={() => {
+              setReportsPanel("kpis");
+              setView("reports");
+            }}
+            className={cn(
+              "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm transition-all",
+              view === "reports" && reportsPanel === "kpis"
+                ? "bg-slate-800 text-white"
+                : "text-slate-400 hover:text-white hover:bg-slate-800"
+            )}
+          >
+            <TrendingUp className={cn("w-5 h-5", view === "reports" && reportsPanel === "kpis" ? "text-white" : "text-slate-500")} />
+            Indicadores
+          </button>
           <button className="w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm text-slate-400 hover:text-white hover:bg-slate-800 transition-all opacity-50 cursor-not-allowed">
             <Users className="w-5 h-5 text-slate-500" />
             Gestión Personal
           </button>
-          <button className="w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm text-slate-400 hover:text-white hover:bg-slate-800 transition-all opacity-50 cursor-not-allowed">
-            <Settings className="w-5 h-5 text-slate-500" />
-            Configuración
+          <button
+            onClick={() => {
+              setReportsPanel("structure");
+              setView("reports");
+            }}
+            className={cn(
+              "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm transition-all",
+              view === "reports" && reportsPanel === "structure"
+                ? "bg-slate-800 text-white"
+                : "text-slate-400 hover:text-white hover:bg-slate-800"
+            )}
+          >
+            <Settings className={cn("w-5 h-5", view === "reports" && reportsPanel === "structure" ? "text-white" : "text-slate-500")} />
+            Estructura
+          </button>
+          <button
+            onClick={() => {
+              setReportsPanel("integrations");
+              setView("reports");
+            }}
+            className={cn(
+              "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm transition-all",
+              view === "reports" && reportsPanel === "integrations"
+                ? "bg-slate-800 text-white"
+                : "text-slate-400 hover:text-white hover:bg-slate-800"
+            )}
+          >
+            <ShieldCheck className={cn("w-5 h-5", view === "reports" && reportsPanel === "integrations" ? "text-white" : "text-slate-500")} />
+            Integraciones
           </button>
         </nav>
 
-        <div className="p-6 mt-auto">
+        <div className="p-6 pt-4 border-t border-slate-800/80 bg-slate-900/95 backdrop-blur-sm">
           {user ? (
             <div className="bg-slate-800/50 rounded-3xl p-4 border border-slate-700/50">
               <div className="flex items-center gap-3 mb-4">
@@ -693,12 +1253,10 @@ function AuditApp() {
               </button>
             </div>
           ) : (
-            <button 
-              onClick={handleLogin}
-              className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-blue-600/20 transition-all active:scale-95"
-            >
-              Iniciar Sesión
-            </button>
+            <div className="rounded-3xl border border-slate-700/50 bg-slate-800/30 p-4">
+              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Acceso</p>
+              <p className="mt-2 text-sm font-bold text-slate-300">El ingreso se realiza desde la barra superior.</p>
+            </div>
           )}
         </div>
       </aside>
@@ -709,7 +1267,9 @@ function AuditApp() {
           <div className={cn(
             "mx-auto flex items-center justify-between",
             view === "dashboard" ? "max-w-7xl" : 
-            (view === "home" || view === "audit" || view === "setup") ? "max-w-md" :
+            view === "setup" ? "max-w-5xl" :
+            view === "audit" ? "max-w-6xl" :
+            view === "home" ? "max-w-md" :
             "max-w-md lg:max-w-none"
           )}>
             <div className={cn(
@@ -719,19 +1279,27 @@ function AuditApp() {
               <div className="bg-blue-600 p-2 rounded-xl">
                 <ClipboardCheck className="text-white w-5 h-5" />
               </div>
-              <h1 className="font-black text-sm tracking-tight leading-none uppercase">AuditPro</h1>
+              <h1 className="font-black text-sm tracking-tight leading-none uppercase">{appTitle}</h1>
             </div>
             
             <div className={cn(
-              "hidden",
+              "hidden min-w-0",
               (view === "dashboard" || view === "history" || view === "reports") ? "lg:block" : "lg:hidden"
             )}>
-              <h2 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em]">
-                {view === "dashboard" && "Resumen Ejecutivo"}
-                {view === "home" && "Nueva Inspección"}
-                {view === "history" && "Registro de Auditorías"}
-                {view === "reports" && "Análisis de Datos"}
-              </h2>
+              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">
+                <span>{activeViewLabel}</span>
+                {view === "reports" && (
+                  <>
+                    <ChevronRight className="h-3.5 w-3.5 text-slate-300" />
+                    <span>{activeControlPanel.label}</span>
+                  </>
+                )}
+              </div>
+              <p className="mt-1 text-sm font-bold text-slate-600">
+                {view === "dashboard" && "Vista general de operación y seguimiento diario."}
+                {view === "history" && "Consulta consolidada del historial y exportaciones."}
+                {view === "reports" && activeControlPanel.description}
+              </p>
             </div>
 
             <div className="flex items-center gap-4">
@@ -743,19 +1311,16 @@ function AuditApp() {
                   <span className="text-xs font-bold text-slate-600 hidden sm:block">{user.displayName?.split(" ")[0]}</span>
                 </div>
               )}
-              <div className={cn(
-                "w-px h-6 bg-slate-200",
-                (view === "home" || view === "audit" || view === "setup") ? "flex" : "lg:hidden flex"
-              )} />
               {!user && (
                 <button 
                   onClick={handleLogin}
                   className={cn(
-                    "p-2 text-slate-400 hover:text-blue-600 transition-colors",
-                    (view === "home" || view === "audit" || view === "setup") ? "flex" : "lg:hidden flex"
+                    "inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-black uppercase tracking-widest text-slate-700 transition-all hover:border-slate-300 hover:text-slate-950",
+                    (view === "home" || view === "audit" || view === "setup") ? "flex" : "flex"
                   )}
                 >
-                  <LogIn className="w-6 h-6" />
+                  <LogIn className="w-4 h-4" />
+                  Ingresar
                 </button>
               )}
             </div>
@@ -765,7 +1330,9 @@ function AuditApp() {
         <main className={cn(
           "p-4 md:p-8 transition-all duration-500",
           view === "dashboard" ? "max-w-7xl mx-auto w-full" : 
-          (view === "home" || view === "audit" || view === "setup") ? "max-w-md mx-auto w-full pb-32" :
+          view === "setup" ? "max-w-5xl mx-auto w-full pb-32" :
+          view === "audit" ? "max-w-6xl mx-auto w-full pb-32" :
+          view === "home" ? "max-w-md mx-auto w-full pb-32" :
           "max-w-md mx-auto w-full lg:max-w-4xl lg:mx-0"
         )}>
           <AnimatePresence mode="wait">
@@ -777,30 +1344,221 @@ function AuditApp() {
               exit={{ opacity: 0, y: -20 }}
               className="space-y-8 pt-4"
             >
-              {/* Desktop Header Section */}
-              <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-                <div className="space-y-2">
-                  <h2 className="text-4xl font-black text-slate-900 leading-tight tracking-tight">Quality Control</h2>
-                  <p className="text-slate-500 font-medium text-lg">Panel de Gestión de Calidad Postventa</p>
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_380px]">
+                <div className="space-y-6">
+                  <div className="hero-shell rounded-[2.4rem] p-7 shadow-sm backdrop-blur space-y-6">
+                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1.15fr)_300px] lg:items-center">
+                      <div className="space-y-5">
+                        <span className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 shadow-sm">
+                          <div className="h-2 w-2 rounded-full bg-emerald-500" />
+                          Inicio operativo
+                        </span>
+                        <div className="space-y-3">
+                          <h2 className="max-w-3xl text-3xl font-black leading-tight tracking-tight text-slate-950 md:text-[2.7rem]">Una entrada más clara, más usable y orientada a la acción.</h2>
+                          <p className="max-w-2xl text-sm font-medium leading-relaxed text-slate-600 md:text-base">El objetivo del inicio no es mostrar todo, sino ayudarte a arrancar rápido. Por eso la apertura prioriza contexto, acceso rápido y lectura operativa antes que el detalle fino.</p>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                          {[
+                            {
+                              label: "Operación",
+                              title: operatingStatus,
+                              detail: user ? "Sesión lista para trabajar." : "Ingresá para habilitar historial y sincronización.",
+                              icon: ShieldCheck,
+                              tone: "slate",
+                            },
+                            {
+                              label: "Mes actual",
+                              title: `${monthlyAudits.length} auditorías`,
+                              detail: `${recentAverageScore || 0}% de promedio mensual`,
+                              icon: CalendarIcon,
+                              tone: "blue",
+                            },
+                            {
+                              label: "Cobertura",
+                              title: `${activeLocations || LOCATIONS.length} sedes`,
+                              detail: "Actividad registrada en el historial.",
+                              icon: MapPin,
+                              tone: "amber",
+                            },
+                          ].map((item) => (
+                            <div key={item.label} className="rounded-[1.5rem] border border-white/80 bg-white/80 px-4 py-4 shadow-sm">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">{item.label}</p>
+                                  <p className="mt-2 text-sm font-black text-slate-950">{item.title}</p>
+                                  <p className="mt-2 text-sm font-medium leading-relaxed text-slate-500">{item.detail}</p>
+                                </div>
+                                <div className={cn(
+                                  "flex h-10 w-10 items-center justify-center rounded-2xl",
+                                  item.tone === "slate" && "bg-slate-950 text-white",
+                                  item.tone === "blue" && "bg-blue-50 text-blue-600",
+                                  item.tone === "amber" && "bg-amber-50 text-amber-600"
+                                )}>
+                                  <item.icon className="h-4 w-4" />
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="flex flex-wrap gap-3">
+                          <button 
+                            onClick={startNewAudit}
+                            className="flex items-center gap-2 rounded-2xl bg-blue-600 px-5 py-3 text-sm font-black uppercase tracking-widest text-white shadow-lg shadow-blue-100 transition-all hover:bg-blue-700 active:scale-95"
+                          >
+                            <Plus className="w-4 h-4" />
+                            Nueva Auditoría
+                          </button>
+                          <button 
+                            onClick={() => setView("history")}
+                            className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-black uppercase tracking-widest text-slate-900 shadow-sm transition-all hover:border-slate-300 active:scale-95"
+                          >
+                            <History className="w-4 h-4" />
+                            Ver Historial
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-4">
+                        <div className="rounded-[2rem] border border-white/70 bg-white/70 p-3 shadow-inner">
+                          <img
+                            src="/hero-auditoria.svg"
+                            alt="Panel de auditoría y control operativo"
+                            className="w-full rounded-[1.5rem] border border-slate-200 bg-white"
+                          />
+                        </div>
+                        <div className="rounded-[1.8rem] bg-slate-950 px-5 py-5 text-white shadow-sm">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Pulso general</p>
+                          <div className="mt-3 flex items-end justify-between gap-3">
+                            <div>
+                              <p className="text-3xl font-black">{bestAuditScore || averageScore}%</p>
+                              <p className="text-sm font-medium text-slate-300">mejor resultado histórico</p>
+                            </div>
+                            <div className="rounded-2xl bg-white/10 px-3 py-2 text-right">
+                              <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Promedio</p>
+                              <p className="mt-1 text-sm font-black">{averageScore}%</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                    <div className="glass-panel rounded-[2rem] p-5 shadow-sm lg:col-span-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Accesos rápidos</p>
+                          <h3 className="mt-2 text-lg font-black text-slate-950">Módulos principales</h3>
+                        </div>
+                        <p className="text-xs font-bold text-slate-400">Abrí lo que necesitás sin pasar por menús extra.</p>
+                      </div>
+
+                      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        {operationalModules.slice(0, 3).map((module) => (
+                          <button
+                            key={module.title}
+                            onClick={module.action}
+                            className="rounded-[1.6rem] border border-slate-200 bg-white px-4 py-4 text-left transition-all hover:border-slate-300 hover:bg-slate-50"
+                          >
+                            <div className={cn(
+                              "mb-4 flex h-11 w-11 items-center justify-center rounded-2xl",
+                              module.tone === "blue" && "bg-blue-50 text-blue-600",
+                              module.tone === "slate" && "bg-slate-900 text-white",
+                              module.tone === "emerald" && "bg-emerald-50 text-emerald-600"
+                            )}>
+                              <module.icon className="w-5 h-5" />
+                            </div>
+                            <p className="text-sm font-black text-slate-900">{module.title}</p>
+                            <p className="mt-2 text-sm font-medium leading-relaxed text-slate-500">{module.description}</p>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="glass-panel rounded-[2rem] p-5 shadow-sm space-y-4">
+                      <div>
+                        <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Estado del sistema</p>
+                        <h3 className="mt-2 text-lg font-black text-slate-950">Lectura rápida</h3>
+                      </div>
+                      <div className="space-y-3">
+                        <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cuenta</p>
+                          <p className="mt-2 text-sm font-black text-slate-900">{user ? "Sesión activa" : "Ingreso disponible"}</p>
+                          <p className="mt-2 text-sm font-medium text-slate-500">{user ? user.email : "Acceso desde el botón superior."}</p>
+                        </div>
+                        <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Estructura</p>
+                          <p className="mt-2 text-sm font-black text-slate-900">{configuredCategoryCount} categorías activas</p>
+                          <p className="mt-2 text-sm font-medium text-slate-500">General y perfiles por sucursal disponibles.</p>
+                        </div>
+                        <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Integración</p>
+                          <p className="mt-2 text-sm font-black text-slate-900">{isSheetSyncConfigured ? "Apps Script activo" : "Sincronización pendiente"}</p>
+                          <p className="mt-2 text-sm font-medium text-slate-500">Preparado para operación distribuida y espejo externo.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <button 
-                    onClick={() => setView("home")}
-                    className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl shadow-blue-100 hover:bg-blue-700 transition-all active:scale-95"
-                  >
-                    <Plus className="w-5 h-5" />
-                    Nueva Auditoría
-                  </button>
+
+                <div className="glass-panel rounded-[2.25rem] p-6 shadow-sm backdrop-blur space-y-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Actividad reciente</p>
+                      <h3 className="text-lg font-black text-slate-900">Últimos movimientos</h3>
+                    </div>
+                    <button
+                      onClick={() => setView("history")}
+                      className="text-xs font-black uppercase tracking-widest text-blue-600"
+                    >
+                      Ver historial
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    {recentAudits.length > 0 ? recentAudits.map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => setSelectedAudit(item)}
+                        className="w-full rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4 text-left transition-all hover:border-slate-300"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-black text-slate-900">{item.staffName || item.location}</p>
+                            <p className="text-[11px] font-bold text-slate-500 mt-1">{item.role || item.items[0]?.category || "General"} · {item.date}</p>
+                          </div>
+                          <span className={cn(
+                            "px-3 py-1.5 rounded-full text-xs font-black",
+                            item.totalScore >= 90 ? "bg-emerald-50 text-emerald-700" :
+                            item.totalScore >= 70 ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-700"
+                          )}>
+                            {item.totalScore}%
+                          </span>
+                        </div>
+                      </button>
+                    )) : (
+                      <div className="rounded-[1.4rem] border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center">
+                        <p className="text-sm font-bold text-slate-500">Todavía no hay auditorías cargadas.</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-[1.6rem] border border-slate-200 bg-slate-50 px-4 py-4">
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Siguiente acción sugerida</p>
+                    <p className="mt-2 text-sm font-black text-slate-900">{history.length > 0 ? "Revisar indicadores y detectar desvíos." : "Crear la primera auditoría operativa."}</p>
+                    <p className="mt-2 text-sm font-medium text-slate-500">{history.length > 0 ? "Usá Control para mirar tendencia, estructura o integraciones según necesidad." : "El sistema ya está preparado para alta, ejecución y trazabilidad."}</p>
+                  </div>
                 </div>
               </div>
 
-              {/* Stats Grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                 {[
                   { label: "Total Auditorías", value: history.length, icon: ClipboardList, color: "blue" },
                   { label: "Promedio General", value: `${Math.round(history.reduce((acc, h) => acc + h.totalScore, 0) / (history.length || 1))}%`, icon: TrendingUp, color: "emerald" },
-                  { label: "Personal Activo", value: "12", icon: Users, color: "indigo" },
-                  { label: "Meta Mensual", value: "95%", icon: Target, color: "amber" },
+                  { label: "Categorías", value: configuredCategoryCount, icon: Settings, color: "indigo" },
+                  { label: "Meta Operativa", value: "95%", icon: Target, color: "amber" },
                 ].map((stat, i) => (
                   <div key={i} className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm flex items-center gap-4">
                     <div className={cn(
@@ -820,7 +1578,6 @@ function AuditApp() {
                 ))}
               </div>
 
-              {/* Charts Section */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="lg:col-span-2 bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm space-y-6">
                   <div className="flex items-center justify-between">
@@ -901,50 +1658,6 @@ function AuditApp() {
                   </div>
                 </div>
               </div>
-
-              {/* Bottom Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-slate-900 rounded-[2.5rem] p-10 text-white relative overflow-hidden shadow-2xl shadow-slate-200">
-                  <div className="absolute top-0 right-0 w-64 h-64 bg-white/5 rounded-full -mr-32 -mt-32" />
-                  <div className="relative z-10 space-y-6">
-                    <div className="flex items-center gap-3">
-                      <div className="w-3 h-3 bg-emerald-400 rounded-full animate-pulse" />
-                      <span className="text-xs font-black uppercase tracking-widest opacity-60">Sincronización en la Nube</span>
-                    </div>
-                    <h4 className="text-3xl font-black leading-tight">Gestión Profesional de Auditorías</h4>
-                    <p className="text-slate-400 text-lg font-medium leading-relaxed max-w-md">
-                      Tus datos se sincronizan automáticamente con Google Sheets para un análisis profundo de KPIs.
-                    </p>
-                    <div className="pt-4 flex items-center gap-4">
-                      <div className="flex -space-x-3">
-                        {[1,2,3].map(i => (
-                          <div key={i} className="w-10 h-10 rounded-full border-2 border-slate-900 bg-slate-800 flex items-center justify-center text-[10px] font-bold">
-                            U{i}
-                          </div>
-                        ))}
-                      </div>
-                      <p className="text-xs font-bold text-slate-500">+12 auditores activos hoy</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-blue-600 rounded-[2.5rem] p-10 text-white relative overflow-hidden shadow-2xl shadow-blue-200">
-                  <div className="absolute bottom-0 left-0 w-64 h-64 bg-white/10 rounded-full -ml-32 -mb-32" />
-                  <div className="relative z-10 space-y-6">
-                    <LayoutDashboard className="w-12 h-12 text-white/40" />
-                    <h4 className="text-3xl font-black leading-tight">Optimizado para Móvil</h4>
-                    <p className="text-blue-100 text-lg font-medium leading-relaxed">
-                      Realiza auditorías en el taller directamente desde tu celular con nuestra interfaz táctil optimizada.
-                    </p>
-                    <button 
-                      onClick={() => setView("home")}
-                      className="px-8 py-4 bg-white text-blue-600 rounded-2xl font-black text-sm uppercase tracking-widest shadow-xl shadow-blue-900/20 hover:scale-105 transition-transform"
-                    >
-                      Comenzar Ahora
-                    </button>
-                  </div>
-                </div>
-              </div>
             </motion.div>
           )}
 
@@ -958,7 +1671,7 @@ function AuditApp() {
             >
 
 
-              <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-[2.5rem] p-8 shadow-xl shadow-blue-100 text-center space-y-6 relative overflow-hidden">
+              <div className="bg-gradient-to-br from-teal-700 via-teal-600 to-amber-500 rounded-[2.5rem] p-8 shadow-xl shadow-teal-100 text-center space-y-6 relative overflow-hidden">
                 <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
                   <div className="absolute -top-10 -left-10 w-40 h-40 bg-white rounded-full blur-3xl" />
                   <div className="absolute -bottom-10 -right-10 w-40 h-40 bg-white rounded-full blur-3xl" />
@@ -969,8 +1682,8 @@ function AuditApp() {
                 </div>
                 
                 <div className="space-y-2">
-                  <h2 className="text-3xl font-black text-white tracking-tight">Nueva Auditoría</h2>
-                  <p className="text-blue-100 text-sm font-medium">Control de calidad postventa rápido y eficiente.</p>
+                  <h2 className="text-3xl font-black text-white tracking-tight">Cabina de auditoría</h2>
+                  <p className="text-teal-50 text-sm font-medium">Preparada para uso móvil, captura operativa y sincronización con tus fuentes externas.</p>
                 </div>
 
                 <div className="space-y-3 pt-2">
@@ -989,11 +1702,50 @@ function AuditApp() {
                   <button 
                     onClick={syncData}
                     disabled={isSyncing}
-                    className="w-full bg-blue-800/30 text-white border border-white/10 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-blue-800/50 transition-all active:scale-95 text-[10px] uppercase tracking-widest"
+                    className="w-full bg-black/15 text-white border border-white/15 py-3 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-black/25 transition-all active:scale-95 text-[10px] uppercase tracking-widest"
                   >
                     <div className={cn("w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin", !isSyncing && "hidden")} />
                     {isSyncing ? "Sincronizando..." : "Sincronizar Datos"}
                   </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <div className="rounded-[2rem] border border-white/70 bg-white/80 backdrop-blur p-5 shadow-sm">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className={cn("w-10 h-10 rounded-2xl flex items-center justify-center", isSheetSyncConfigured ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600")}>
+                      <ClipboardCheck className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Apps Script</p>
+                      <p className="text-sm font-black text-slate-900">{isSheetSyncConfigured ? "Activo" : "Pendiente"}</p>
+                    </div>
+                  </div>
+                  <p className="text-sm text-slate-600">{isSheetSyncConfigured ? "Las auditorías pueden enviarse al endpoint configurado." : "Falta definir la URL de recepción para enviar auditorías."}</p>
+                </div>
+                <div className="rounded-[2rem] border border-white/70 bg-white/80 backdrop-blur p-5 shadow-sm">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className={cn("w-10 h-10 rounded-2xl flex items-center justify-center", isHistorySyncConfigured ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600")}>
+                      <Clock className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">CSV público</p>
+                      <p className="text-sm font-black text-slate-900">{isHistorySyncConfigured ? "Listo" : "Pendiente"}</p>
+                    </div>
+                  </div>
+                  <p className="text-sm text-slate-600">{isHistorySyncConfigured ? "El historial puede sincronizarse desde Google Sheets." : "Definí una URL CSV publicada para refrescar reportes."}</p>
+                </div>
+                <div className="rounded-[2rem] border border-white/70 bg-white/80 backdrop-blur p-5 shadow-sm">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className={cn("w-10 h-10 rounded-2xl flex items-center justify-center", user ? "bg-emerald-50 text-emerald-600" : "bg-slate-100 text-slate-500")}>
+                      <AlertCircle className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Acceso</p>
+                      <p className="text-sm font-black text-slate-900">{user ? "Autenticado" : "Invitado"}</p>
+                    </div>
+                  </div>
+                  <p className="text-sm text-slate-600">{user ? "Hay acceso a historial y persistencia en Firestore." : "Sin iniciar sesión, la app no puede consultar el historial completo."}</p>
                 </div>
               </div>
 
@@ -1018,7 +1770,7 @@ function AuditApp() {
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {history.slice(0, 3).map((item) => (
+                    {recentAudits.map((item) => (
                       <div key={item.id} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 flex items-center justify-between">
                         <div className="flex items-center gap-3">
                           <div className={cn(
@@ -1050,92 +1802,235 @@ function AuditApp() {
               exit={{ opacity: 0, x: -20 }}
               className="space-y-6"
             >
-              <div className="space-y-4">
-                <h2 className="text-2xl font-bold">Configuración</h2>
-                <p className="text-gray-500 text-sm">Define los parámetros básicos de la auditoría.</p>
-              </div>
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.15fr)_360px]">
+                <div className="space-y-6">
+                  <div className="hero-shell rounded-[2.25rem] p-7 shadow-sm space-y-6">
+                    <div className="space-y-3">
+                      <span className="inline-flex items-center gap-2 rounded-full bg-white/80 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 shadow-sm">
+                        <div className="h-2 w-2 rounded-full bg-blue-600" />
+                        Alta guiada
+                      </span>
+                      <div>
+                        <h2 className="text-3xl font-black tracking-tight text-slate-950">Configuración de auditoría</h2>
+                        <p className="mt-2 text-sm font-medium leading-relaxed text-slate-500">Las plataformas de auditoría suelen trabajar este momento como un asistente: primero responsable, después sucursal y por último fecha operativa.</p>
+                      </div>
+                    </div>
 
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-gray-400 px-1">Auditor</label>
-                  <div className="grid grid-cols-1 gap-2">
-                    {AUDITORS.map(auditor => (
-                      <button
-                        key={auditor.id}
-                        onClick={() => setSession({ ...session, auditorId: auditor.id })}
-                        className={cn(
-                          "flex items-center justify-between p-4 rounded-2xl border transition-all",
-                          session.auditorId === auditor.id 
-                            ? "border-[#1A1A1A] bg-[#1A1A1A] text-white" 
-                            : "border-gray-200 bg-white text-gray-600"
-                        )}
-                      >
-                        <div className="flex items-center gap-3">
-                          <User className="w-5 h-5" />
-                          <span className="font-semibold">{auditor.name}</span>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                      {[
+                        { step: 1, title: "Auditor", detail: "Quién ejecuta la revisión." },
+                        { step: 2, title: "Sucursal", detail: "Dónde corre la auditoría." },
+                        { step: 3, title: "Fecha", detail: "Cuándo se registra el operativo." },
+                      ].map((item) => {
+                        const isActive = setupStep === item.step;
+                        const isDone = setupStep > item.step || (item.step === 1 && session.auditorId) || (item.step === 2 && session.location) || (item.step === 3 && session.date);
+
+                        return (
+                          <button
+                            key={item.step}
+                            onClick={() => setSetupStep(item.step as 1 | 2 | 3)}
+                            className={cn(
+                              "rounded-[1.6rem] border px-4 py-4 text-left transition-all",
+                              isActive ? "border-slate-950 bg-slate-950 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className={cn("text-[10px] font-black uppercase tracking-[0.18em]", isActive ? "text-slate-300" : "text-slate-400")}>Paso {item.step}</p>
+                                <p className="mt-2 text-sm font-black">{item.title}</p>
+                                <p className={cn("mt-2 text-sm font-medium", isActive ? "text-slate-300" : "text-slate-500")}>{item.detail}</p>
+                              </div>
+                              <div className={cn(
+                                "flex h-9 w-9 items-center justify-center rounded-2xl text-xs font-black",
+                                isActive ? "bg-white/10 text-white" : isDone ? "bg-emerald-50 text-emerald-600" : "bg-slate-100 text-slate-500"
+                              )}>
+                                {isDone ? <Check className="h-4 w-4" /> : `0${item.step}`}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="glass-panel rounded-[2.25rem] p-6 shadow-sm space-y-5">
+                    {setupStep === 1 && (
+                      <div className="space-y-4">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Paso 1</p>
+                          <h3 className="mt-2 text-xl font-black text-slate-950">Seleccionar auditor</h3>
+                          <p className="mt-2 text-sm font-medium text-slate-500">Definí el responsable operativo que va a ejecutar la auditoría.</p>
                         </div>
-                        {session.auditorId === auditor.id && <Check className="w-5 h-5" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
 
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-gray-400 px-1">Ubicación</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {LOCATIONS.map(loc => (
+                        <div className="grid grid-cols-1 gap-3">
+                          {AUDITORS.map((auditor) => (
+                            <button
+                              key={auditor.id}
+                              onClick={() => setSession({ ...session, auditorId: auditor.id })}
+                              className={cn(
+                                "flex items-center justify-between rounded-[1.6rem] border p-5 text-left transition-all",
+                                session.auditorId === auditor.id
+                                  ? "border-slate-950 bg-slate-950 text-white"
+                                  : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                              )}
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className={cn(
+                                  "flex h-11 w-11 items-center justify-center rounded-2xl",
+                                  session.auditorId === auditor.id ? "bg-white/10 text-white" : "bg-slate-100 text-slate-600"
+                                )}>
+                                  <User className="w-5 h-5" />
+                                </div>
+                                <div>
+                                  <p className="text-sm font-black">{auditor.name}</p>
+                                  <p className={cn("mt-1 text-xs font-bold", session.auditorId === auditor.id ? "text-slate-300" : "text-slate-500")}>Responsable que firma y ejecuta el relevamiento.</p>
+                                </div>
+                              </div>
+                              {session.auditorId === auditor.id && <Check className="w-5 h-5" />}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {setupStep === 2 && (
+                      <div className="space-y-4">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Paso 2</p>
+                          <h3 className="mt-2 text-xl font-black text-slate-950">Elegir ubicación</h3>
+                          <p className="mt-2 text-sm font-medium text-slate-500">La sucursal define qué estructura se usa y a qué operación se asocia el control.</p>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          {LOCATIONS.map((loc) => (
+                            <button
+                              key={loc}
+                              onClick={() => setSession({ ...session, location: loc as Location })}
+                              className={cn(
+                                "rounded-[1.6rem] border p-5 text-left transition-all",
+                                session.location === loc
+                                  ? "border-slate-950 bg-slate-950 text-white"
+                                  : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                              )}
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-3">
+                                  <div className={cn(
+                                    "flex h-11 w-11 items-center justify-center rounded-2xl",
+                                    session.location === loc ? "bg-white/10 text-white" : "bg-slate-100 text-slate-600"
+                                  )}>
+                                    <MapPin className="w-5 h-5" />
+                                  </div>
+                                  <div>
+                                    <p className="text-sm font-black">{loc}</p>
+                                    <p className={cn("mt-1 text-xs font-bold", session.location === loc ? "text-slate-300" : "text-slate-500")}>Perfil operativo y estructura aplicable.</p>
+                                  </div>
+                                </div>
+                                {session.location === loc && <Check className="w-5 h-5" />}
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {setupStep === 3 && (
+                      <div className="space-y-4">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Paso 3</p>
+                          <h3 className="mt-2 text-xl font-black text-slate-950">Confirmar fecha operativa</h3>
+                          <p className="mt-2 text-sm font-medium text-slate-500">Definí la fecha que quedará como referencia del registro y del historial consolidado.</p>
+                        </div>
+
+                        <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 space-y-4">
+                          <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Fecha</label>
+                          <div className="relative">
+                            <CalendarIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                            <input 
+                              type="date" 
+                              value={session.date}
+                              onChange={(e) => setSession({ ...session, date: e.target.value })}
+                              className="w-full rounded-2xl border border-gray-200 bg-slate-50 py-4 pl-12 pr-4 font-semibold focus:outline-none"
+                            />
+                          </div>
+                          <div className="rounded-[1.4rem] bg-slate-50 px-4 py-4 border border-slate-200">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Listo para continuar</p>
+                            <p className="mt-2 text-sm font-medium text-slate-600">Con esta confirmación el sistema te deriva a la selección del puesto o categoría a auditar.</p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex flex-col gap-3 border-t border-slate-200 pt-5 sm:flex-row sm:items-center sm:justify-between">
                       <button
-                        key={loc}
-                        onClick={() => setSession({ ...session, location: loc as Location })}
-                        className={cn(
-                          "flex items-center justify-center gap-2 p-4 rounded-2xl border transition-all",
-                          session.location === loc 
-                            ? "border-[#1A1A1A] bg-[#1A1A1A] text-white" 
-                            : "border-gray-200 bg-white text-gray-600"
-                        )}
+                        onClick={() => {
+                          if (setupStep === 1) {
+                            setView("dashboard");
+                            return;
+                          }
+                          setSetupStep((current) => (current - 1) as 1 | 2 | 3);
+                        }}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-black uppercase tracking-widest text-slate-700 hover:border-slate-300 transition-all"
                       >
-                        <MapPin className="w-5 h-5" />
-                        <span className="font-semibold">{loc}</span>
+                        <ArrowLeft className="w-4 h-4" />
+                        {setupStep === 1 ? "Cancelar" : "Volver"}
                       </button>
-                    ))}
+
+                      <button 
+                        onClick={handleSetupSubmit}
+                        disabled={(setupStep === 1 && !session.auditorId) || (setupStep === 2 && !session.location) || (setupStep === 3 && !session.date)}
+                        className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 py-3 text-xs font-black uppercase tracking-widest text-white transition-all disabled:cursor-not-allowed disabled:opacity-50 hover:bg-slate-800"
+                      >
+                        {setupStep === 3 ? "Ir a la auditoría" : "Continuar"}
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-gray-400 px-1">Fecha</label>
-                  <div className="relative">
-                    <CalendarIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                    <input 
-                      type="date" 
-                      value={session.date}
-                      onChange={(e) => setSession({ ...session, date: e.target.value })}
-                      className="w-full pl-12 pr-4 py-4 bg-white border border-gray-200 rounded-2xl font-semibold focus:outline-none focus:ring-2 focus:ring-black/5"
-                    />
-                  </div>
-                </div>
+                <div className="space-y-4 xl:sticky xl:top-28 h-fit">
+                  <div className="glass-panel rounded-[2.25rem] p-6 shadow-sm space-y-5">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Estado del alta</p>
+                      <h3 className="mt-2 text-xl font-black text-slate-950">Resumen operativo</h3>
+                    </div>
 
-                <div className="space-y-2">
-                  <label className="text-xs font-bold uppercase tracking-wider text-gray-400 px-1">Número de Orden (OR)</label>
-                  <div className="relative">
-                    <ClipboardList className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                    <input 
-                      type="text" 
-                      placeholder="Ej: 259132"
-                      value={session.orderNumber || ""}
-                      onChange={(e) => setSession({ ...session, orderNumber: e.target.value })}
-                      className="w-full pl-12 pr-4 py-4 bg-white border border-gray-200 rounded-2xl font-semibold focus:outline-none focus:ring-2 focus:ring-black/5"
-                    />
+                    <div className="rounded-[1.6rem] bg-slate-950 px-5 py-5 text-white">
+                      <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Progreso</p>
+                      <div className="mt-3 flex items-end justify-between gap-3">
+                        <div>
+                          <p className="text-3xl font-black">{setupCompletionCount}/3</p>
+                          <p className="text-sm font-medium text-slate-300">datos principales definidos</p>
+                        </div>
+                        <div className="rounded-2xl bg-white/10 px-3 py-2 text-right">
+                          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Paso actual</p>
+                          <p className="mt-1 text-sm font-black">0{setupStep}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Auditor</p>
+                        <p className="mt-2 text-sm font-black text-slate-900">{selectedAuditorOption?.name ?? "Sin seleccionar"}</p>
+                      </div>
+                      <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sucursal</p>
+                        <p className="mt-2 text-sm font-black text-slate-900">{session.location ?? "Sin seleccionar"}</p>
+                      </div>
+                      <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Fecha</p>
+                        <p className="mt-2 text-sm font-black text-slate-900">{session.date || "Sin definir"}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[2.25rem] border border-slate-200 bg-white p-6 shadow-sm space-y-3">
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Criterio profesional</p>
+                    <p className="text-sm font-medium leading-relaxed text-slate-600">Separar el alta en pasos reduce errores, mejora la legibilidad en celular y deja más claro qué falta antes de empezar a auditar.</p>
                   </div>
                 </div>
               </div>
-
-              <button 
-                onClick={handleSetupSubmit}
-                disabled={!session.auditorId || !session.location || (selectedRole === "Ordenes" && !session.orderNumber)}
-                className="w-full bg-[#1A1A1A] text-white py-4 rounded-2xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed mt-8"
-              >
-                Continuar
-              </button>
             </motion.div>
           )}
 
@@ -1149,129 +2044,252 @@ function AuditApp() {
             >
               {!selectedRole ? (
                 <div className="space-y-6">
-                  <div className="space-y-2">
-                    <h2 className="text-2xl font-bold">Seleccionar Puesto</h2>
-                    <p className="text-gray-500 text-sm">Elige el área o puesto que deseas auditar.</p>
+                  <div className="hero-shell rounded-[2.2rem] p-6 shadow-sm lg:p-7">
+                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-center">
+                      <div className="space-y-4">
+                        <span className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 shadow-sm">
+                          <div className="h-2 w-2 rounded-full bg-blue-600" />
+                          Selección de categoría
+                        </span>
+                        <div className="space-y-2">
+                          <h2 className="text-2xl font-black tracking-tight text-slate-950 lg:text-3xl">Elegí qué área vas a auditar.</h2>
+                          <p className="text-sm font-medium leading-relaxed text-slate-500">En celular conviene un flujo corto y táctil. En computadora tiene sentido mostrar más contexto para decidir rápido sin entrar y salir.</p>
+                        </div>
+                        <div className="hidden lg:grid lg:grid-cols-3 lg:gap-3">
+                          <div className="rounded-[1.4rem] border border-white/80 bg-white/80 px-4 py-4 shadow-sm">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Auditor</p>
+                            <p className="mt-2 text-sm font-black text-slate-900">{selectedAuditorOption?.name ?? "Sin definir"}</p>
+                          </div>
+                          <div className="rounded-[1.4rem] border border-white/80 bg-white/80 px-4 py-4 shadow-sm">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sucursal</p>
+                            <p className="mt-2 text-sm font-black text-slate-900">{session.location ?? "Sin definir"}</p>
+                          </div>
+                          <div className="rounded-[1.4rem] border border-white/80 bg-white/80 px-4 py-4 shadow-sm">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Fecha</p>
+                            <p className="mt-2 text-sm font-black text-slate-900">{session.date || "Sin definir"}</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="hidden lg:block">
+                        <div className="rounded-[1.8rem] bg-slate-950 px-5 py-5 text-white shadow-sm">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sugerencia</p>
+                          <p className="mt-3 text-lg font-black">Empezá por la categoría más crítica del día.</p>
+                          <p className="mt-2 text-sm font-medium leading-relaxed text-slate-300">Después vas a poder volver a esta selección sin perder la configuración inicial del operativo.</p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    {Object.keys(AUDIT_QUESTIONS).map((role) => (
+
+                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-5">
+                    {auditCategories.map((category) => (
                       <button
-                        key={role}
-                        onClick={() => setSelectedRole(role as Role)}
-                        className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm flex flex-col items-center justify-center gap-3 group hover:border-blue-200 hover:shadow-md transition-all active:scale-95"
+                        key={category.id}
+                        onClick={() => setSelectedRole(category.name)}
+                        className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-col items-center justify-center gap-3 group hover:border-blue-200 hover:shadow-md transition-all active:scale-95 lg:items-start lg:text-left lg:min-h-[180px]"
                       >
                         <div className="w-12 h-12 bg-gray-50 rounded-2xl flex items-center justify-center group-hover:bg-blue-50 transition-colors">
-                          {role.includes("Asesor") && <UserCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {role.includes("Técnico") && <Wrench className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {role.includes("Jefe") && <ShieldCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {role.includes("Lavadero") && <Droplets className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {role.includes("Garantía") && <FileCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {role.includes("Repuestos") && <Package className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {role.includes("Pre Entrega") && <Truck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {role.includes("Ordenes") && <FileText className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {!["Asesor", "Técnico", "Jefe", "Lavadero", "Garantía", "Repuestos", "Pre Entrega", "Ordenes"].some(k => role.includes(k)) && (
+                          {category.name.includes("Asesor") && <UserCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Técnico") && <Wrench className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Jefe") && <ShieldCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Lavadero") && <Droplets className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Garantía") && <FileCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Repuestos") && <Package className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Pre Entrega") && <Truck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Ordenes") && <FileText className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                          {!["Asesor", "Técnico", "Jefe", "Lavadero", "Garantía", "Repuestos", "Pre Entrega", "Ordenes"].some(k => category.name.includes(k)) && (
                             <ClipboardList className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />
                           )}
                         </div>
-                        <span className="font-bold text-gray-800 text-xs text-center leading-tight">{role}</span>
+                        <span className="font-bold text-gray-800 text-xs text-center leading-tight lg:text-sm lg:text-left">{category.name}</span>
+                        <span className="hidden lg:block text-xs font-medium text-slate-500 leading-relaxed">{category.items.length} puntos de control disponibles para esta categoría.</span>
                       </button>
                     ))}
                   </div>
                 </div>
               ) : (
-                <div className="space-y-6">
-                  <div className="sticky top-0 z-20 bg-[#F9F9F9] pt-4 pb-2 -mx-4 px-4 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <button 
-                          onClick={() => setSelectedRole(null)}
-                          className="p-2 -ml-2 text-gray-400 hover:text-gray-900 bg-white rounded-full shadow-sm border border-gray-100"
-                        >
-                          <ArrowLeft className="w-5 h-5" />
-                        </button>
-                        <div>
-                          <h2 className="text-lg font-bold leading-tight">{selectedRole}</h2>
-                          <p className="text-[10px] text-gray-400 uppercase font-black tracking-widest">Auditoría en curso</p>
+                <div className="grid grid-cols-1 gap-6 lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[360px_minmax(0,1fr)]">
+                  <div className="space-y-4 lg:sticky lg:top-28 h-fit">
+                    <div className={cn(
+                      "pt-3 pb-2 px-4 space-y-3 rounded-[2rem] shadow-sm",
+                      selectedRole === "Ordenes" ? "bg-[#EEF3F9]/95 backdrop-blur-xl" : "bg-[#F9F9F9] border border-slate-200"
+                    )}>
+                      <div className={cn(
+                        "flex items-center justify-between rounded-[1.6rem] border px-4 py-3 shadow-sm",
+                        selectedRole === "Ordenes"
+                          ? "bg-gradient-to-br from-slate-950 via-[#0c2340] to-[#1d4f91] border-slate-800 text-white shadow-[0_20px_60px_rgba(12,35,64,0.35)]"
+                          : "bg-white border-gray-100 text-gray-900"
+                      )}>
+                        <div className="flex items-center gap-2">
+                          <button 
+                            onClick={() => setSelectedRole(null)}
+                            className={cn(
+                              "p-2 -ml-2 rounded-full shadow-sm border",
+                              selectedRole === "Ordenes"
+                                ? "text-slate-200 hover:text-white bg-white/10 border-white/10"
+                                : "text-gray-400 hover:text-gray-900 bg-white border-gray-100"
+                            )}
+                          >
+                            <ArrowLeft className="w-5 h-5" />
+                          </button>
+                          <div>
+                            <h2 className="text-lg font-bold leading-tight">{selectedRole}</h2>
+                            <p className={cn(
+                              "text-[10px] uppercase font-black tracking-widest",
+                              selectedRole === "Ordenes" ? "text-blue-100/80" : "text-gray-400"
+                            )}>
+                              {selectedRole === "Ordenes" ? "Control documental VW" : "Auditoría en curso"}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className={cn(
+                            "text-xl font-black leading-none",
+                            selectedRole === "Ordenes" ? "text-white" : "text-gray-900"
+                          )}>
+                            {selectedAuditItems.length > 0 ? Math.round((sessionItems.length / selectedAuditItems.length) * 100) : 0}%
+                          </div>
+                          <div className={cn(
+                            "text-[10px] font-bold uppercase tracking-tighter",
+                            selectedRole === "Ordenes" ? "text-blue-100/80" : "text-gray-400"
+                          )}>Progreso</div>
+                          <div className={cn(
+                            "text-[10px] font-black uppercase tracking-tighter mt-1",
+                            selectedRole === "Ordenes" ? "text-cyan-300" : "text-emerald-600"
+                          )}>Score {calculateCurrentScore()}%</div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <div className="text-2xl font-black text-gray-900 leading-none">
-                          {Math.round((session.items.length / AUDIT_QUESTIONS[selectedRole].length) * 100)}%
-                        </div>
-                        <div className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">Progreso</div>
-                      </div>
-                    </div>
 
-                    <div className="space-y-2">
+                      <div className={cn(
+                        "space-y-2 rounded-[1.4rem] border p-3 shadow-sm",
+                        selectedRole === "Ordenes" ? "bg-white border-slate-200" : "bg-white border-slate-200"
+                      )}>
                       <div className="h-2 w-full bg-gray-200 rounded-full overflow-hidden">
                         <motion.div 
                           initial={{ width: 0 }}
-                          animate={{ width: `${(session.items.length / AUDIT_QUESTIONS[selectedRole].length) * 100}%` }}
-                          className="h-full bg-blue-500 rounded-full"
+                          animate={{ width: `${selectedAuditItems.length > 0 ? (sessionItems.length / selectedAuditItems.length) * 100 : 0}%` }}
+                          className={cn(
+                            "h-full rounded-full",
+                            selectedRole === "Ordenes" ? "bg-gradient-to-r from-[#1d4f91] via-[#0066b1] to-[#00a3e0]" : "bg-blue-500"
+                          )}
                         />
                       </div>
                       <div className="flex justify-between items-center px-1">
                         <div className="flex gap-3">
                           <div className="flex items-center gap-1">
                             <div className="w-2 h-2 rounded-full bg-green-500" />
-                            <span className="text-[10px] font-bold text-gray-500">{session.items.filter(i => i.status === 'pass').length}</span>
+                            <span className="text-[10px] font-bold text-gray-500">{sessionItems.filter(i => i.status === 'pass').length}</span>
                           </div>
                           <div className="flex items-center gap-1">
                             <div className="w-2 h-2 rounded-full bg-red-500" />
-                            <span className="text-[10px] font-bold text-gray-500">{session.items.filter(i => i.status === 'fail').length}</span>
+                            <span className="text-[10px] font-bold text-gray-500">{sessionItems.filter(i => i.status === 'fail').length}</span>
                           </div>
                           <div className="flex items-center gap-1">
                             <div className="w-2 h-2 rounded-full bg-gray-400" />
-                            <span className="text-[10px] font-bold text-gray-500">{session.items.filter(i => i.status === 'na').length}</span>
+                            <span className="text-[10px] font-bold text-gray-500">{sessionItems.filter(i => i.status === 'na').length}</span>
                           </div>
                         </div>
                         <span className="text-[10px] font-bold text-gray-400 uppercase">
-                          {session.items.length} de {AUDIT_QUESTIONS[selectedRole].length}
+                          {sessionItems.length} de {selectedAuditItems.length}
                         </span>
                       </div>
+                      {selectedRole === "Ordenes" && (
+                        <div className="grid grid-cols-2 gap-2 pt-1 sm:grid-cols-4">
+                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Ritmo</p>
+                            <p className="text-base font-black text-slate-900">{sessionItems.length}</p>
+                            <p className="text-[11px] text-slate-500">cargados</p>
+                          </div>
+                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Estado</p>
+                            <p className="text-base font-black text-slate-900">{sessionItems.filter(i => i.status === 'pass').length}</p>
+                            <p className="text-[11px] text-slate-500">cumplen</p>
+                          </div>
+                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Desvíos</p>
+                            <p className="text-base font-black text-slate-900">{sessionItems.filter(i => i.status === 'fail').length}</p>
+                            <p className="text-[11px] text-slate-500">revisar</p>
+                          </div>
+                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Siguiente</p>
+                            <p className="text-base font-black text-slate-900">
+                              {nextPendingItemIndex >= 0 ? String(nextPendingItemIndex + 1).padStart(2, "0") : "OK"}
+                            </p>
+                            <p className="text-[11px] text-slate-500">pendiente</p>
+                          </div>
+                        </div>
+                      )}
                     </div>
+
                   </div>
 
-                  {STAFF[selectedRole] && STAFF[selectedRole].length > 0 && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="space-y-2">
+                    {selectedAuditStaffOptions.length > 0 && (
+                      <div className="space-y-2 rounded-[1.6rem] border border-slate-200 bg-white p-4 shadow-sm">
                         <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Personal Auditado</label>
                         <div className="relative">
                           <select 
                             value={selectedStaff}
                             onChange={(e) => setSelectedStaff(e.target.value)}
-                            className="w-full p-4 bg-white border border-gray-200 rounded-2xl font-bold text-sm appearance-none focus:outline-none shadow-sm"
+                            className="w-full p-4 bg-slate-50 border border-gray-200 rounded-2xl font-bold text-sm appearance-none focus:outline-none shadow-sm"
                           >
                             <option value="">Seleccionar nombre...</option>
-                            {STAFF[selectedRole].map(name => (
+                            {selectedAuditStaffOptions.map(name => (
                               <option key={name} value={name}>{name}</option>
                             ))}
                           </select>
                           <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
                         </div>
                       </div>
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Número de OR / Referencia</label>
-                        <input 
-                          type="text"
-                          placeholder="Ej: 259132"
-                          value={session.orderNumber || ""}
-                          onChange={(e) => setSession({ ...session, orderNumber: e.target.value })}
-                          className="w-full p-4 bg-white border border-gray-200 rounded-2xl font-bold text-sm focus:outline-none shadow-sm"
-                        />
-                      </div>
-                    </div>
-                  )}
+                    )}
 
-                  <div className="space-y-4 pb-32">
-                    {selectedRole && AUDIT_QUESTIONS[selectedRole].map((q: string, idx: number) => (
+                    {selectedRole === "Ordenes" && selectedStaff && (
+                      <div className="rounded-[1.6rem] border border-slate-200 bg-white px-4 py-4 shadow-sm space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-[#1d4f91]">Meta por asesor</p>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h3 className="text-sm font-black text-slate-900">{selectedStaff}</h3>
+                              <span className="text-[11px] font-bold text-slate-500">{auditedOrdersForSelectedStaff} / {ordersTargetPerAdvisor}</span>
+                              <span className={cn(
+                                "text-[11px] font-black uppercase tracking-wide",
+                                auditedOrdersRemaining === 0 ? "text-emerald-700" : "text-amber-600"
+                              )}>
+                                {auditedOrdersRemaining === 0 ? "Meta alcanzada" : `Faltan ${auditedOrdersRemaining}`}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="rounded-xl bg-slate-950 px-3 py-2 border border-slate-900 text-center min-w-[68px]">
+                            <div className="text-lg font-black text-white leading-none">{auditedOrdersForSelectedStaff}</div>
+                          </div>
+                        </div>
+                        <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+                          <motion.div
+                            initial={{ width: 0 }}
+                            animate={{ width: `${auditedOrdersProgress}%` }}
+                            className="h-full bg-gradient-to-r from-[#0c2340] via-[#1d4f91] to-[#00a3e0] rounded-full"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="hidden lg:block rounded-[1.6rem] border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Modo escritorio</p>
+                      <p className="mt-2 text-sm font-black text-slate-900">Más contexto, menos salto visual</p>
+                      <p className="mt-2 text-sm font-medium leading-relaxed text-slate-500">En computadora dejamos el contexto fijo a la izquierda y el trabajo principal a la derecha. En móvil el flujo sigue siendo vertical y directo.</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 pb-12 min-w-0">
+                    {selectedAuditItems.map((auditItem, idx: number) => (
                       <AuditItemRow 
-                        key={`${selectedRole}-${idx}`}
-                        question={q}
+                        key={auditItem.id}
+                        question={auditItem.text}
                         index={idx}
-                        item={session.items?.find(i => i.question === q)}
-                        onStatusToggle={(status) => toggleItemStatus(q, status)}
-                        onCommentUpdate={(comment) => updateItemComment(q, comment)}
+                        item={session.items?.find(i => i.question === auditItem.text)}
+                        required={auditItem.required}
+                        showStructuredQuestion={selectedRole === "Ordenes"}
+                        onStatusToggle={(status) => toggleItemStatus(auditItem.text, status)}
+                        onCommentUpdate={(comment) => updateItemComment(auditItem.text, comment)}
                       />
                     ))}
                     
@@ -1281,64 +2299,37 @@ function AuditApp() {
                         placeholder="Escribe aquí cualquier nota adicional sobre esta auditoría..."
                         value={session.notes || ""}
                         onChange={(e) => setSession({ ...session, notes: e.target.value })}
-                        className="w-full p-6 bg-white border border-gray-200 rounded-3xl font-medium text-sm focus:outline-none shadow-sm min-h-[120px]"
+                        className={cn(
+                          "w-full p-6 border rounded-3xl font-medium text-sm focus:outline-none shadow-sm min-h-[120px]",
+                          selectedRole === "Ordenes"
+                            ? "bg-white border-slate-200 text-slate-700"
+                            : "bg-white border-gray-200"
+                        )}
                       />
                     </div>
-                  </div>
 
-                  {/* Sticky Bottom Bar */}
-                  <div className="fixed bottom-0 left-0 right-0 z-30 p-4 bg-white/80 backdrop-blur-lg border-t border-gray-100 shadow-[0_-10px_20px_rgba(0,0,0,0.02)]">
-                    <div className="flex items-center gap-4 max-w-md mx-auto">
-                      <div className="flex-1">
-                        <div className="flex justify-between items-end mb-1">
-                          <span className="text-[10px] font-black text-gray-400 uppercase tracking-tighter">Puntaje Actual</span>
-                          <span className={cn(
-                            "text-lg font-black leading-none",
-                            calculateCurrentScore() >= 90 ? "text-green-600" : 
-                            calculateCurrentScore() >= 70 ? "text-yellow-600" : "text-red-600"
-                          )}>
-                            {calculateCurrentScore()}%
-                          </span>
-                        </div>
-                        <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden">
-                          <motion.div 
-                            initial={{ width: 0 }}
-                            animate={{ width: `${calculateCurrentScore()}%` }}
-                            className={cn(
-                              "h-full rounded-full transition-all duration-500",
-                              calculateCurrentScore() >= 90 ? "bg-green-500" : 
-                              calculateCurrentScore() >= 70 ? "bg-yellow-500" : "bg-red-500"
-                            )}
-                          />
-                        </div>
-                      </div>
-                      <button 
-                        onClick={handleAuditSubmit}
-                        disabled={session.items.length === 0 || isSendingToSheet}
-                        className={cn(
-                          "px-8 py-3.5 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-2 transition-all active:scale-95 shadow-lg whitespace-nowrap",
-                          session.items.length > 0 && !isSendingToSheet
-                            ? "bg-blue-600 text-white shadow-blue-100"
-                            : "bg-gray-100 text-gray-400 cursor-not-allowed shadow-none"
-                                                    ? "bg-green-600 text-white shadow-green-100 hover:bg-green-700"
-                                                    : "bg-gray-100 text-gray-400 cursor-not-allowed shadow-none"
-                        )}
-                      >
-                        {isSendingToSheet ? (
-                          <>
-                            <div className="w-4 h-4 border-2 border-blue-600/30 border-t-blue-600 rounded-full animate-spin" />
-                                                        <div className="w-4 h-4 border-2 border-green-600/30 border-t-green-600 rounded-full animate-spin" />
-                            Enviando...
-                          </>
-                        ) : (
-                          <>
-                            <Save className="w-4 h-4" />
-                                                        <Save className="w-4 h-4" />
-                            Enviar al Sheet
-                          </>
-                        )}
-                      </button>
-                    </div>
+                    <button
+                      onClick={handleAuditSubmit}
+                      disabled={sessionItems.length === 0 || isSendingToSheet}
+                      className={cn(
+                        "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                        sessionItems.length > 0 && !isSendingToSheet
+                          ? (selectedRole === "Ordenes" ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]" : "bg-green-600 text-white shadow-green-100 hover:bg-green-700")
+                          : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                      )}
+                    >
+                      {isSendingToSheet ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                          Enviando al Sheet...
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-4 h-4" />
+                          Enviar auditoría
+                        </>
+                      )}
+                    </button>
                   </div>
                 </div>
               )}
@@ -1354,23 +2345,404 @@ function AuditApp() {
               className="space-y-6 pb-12"
             >
               <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-bold">Reportes</h2>
-                <div className="flex gap-2">
-                  <button 
-                    onClick={() => {
-                      const url = prompt("Pega aquí la URL de tu Google Apps Script:", webhookUrl);
-                      if (url !== null) {
-                        setWebhookUrl(url);
-                        localStorage.setItem("webhookUrl", url);
-                      }
-                    }}
-                    className="p-2 bg-white border border-gray-200 rounded-xl text-gray-400 hover:text-blue-600"
+                <h2 className="text-2xl font-bold">Control</h2>
+                <div className="flex items-center gap-2 text-[11px] font-bold text-slate-500">
+                  <activeControlPanel.icon className="w-4 h-4" />
+                  {activeControlPanel.label}
+                </div>
+              </div>
+
+              <div className="rounded-[2rem] border border-slate-200 bg-white p-3 shadow-sm space-y-3">
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                  {controlPanels.map((panel) => (
+                    <button
+                      key={panel.id}
+                      onClick={() => setReportsPanel(panel.id)}
+                      className={cn(
+                        "rounded-[1.5rem] border px-4 py-4 text-left transition-all",
+                        reportsPanel === panel.id
+                          ? "border-slate-950 bg-slate-950 text-white shadow-lg shadow-slate-200"
+                          : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300 hover:bg-white"
+                      )}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={cn(
+                          "flex h-10 w-10 items-center justify-center rounded-2xl",
+                          reportsPanel === panel.id ? "bg-white/10 text-white" : "bg-white text-slate-700"
+                        )}>
+                          <panel.icon className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-black">{panel.label}</p>
+                          <p className={cn(
+                            "mt-1 text-xs font-bold",
+                            reportsPanel === panel.id ? "text-slate-300" : "text-slate-500"
+                          )}>
+                            {panel.description}
+                          </p>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 px-4 py-4">
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Modo activo</p>
+                  <p className="mt-2 text-base font-black text-slate-900">{activeControlPanel.label}</p>
+                  <p className="mt-1 text-sm font-medium text-slate-500">{activeControlPanel.description}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+                {[
+                  {
+                    title: "Supervisión",
+                    detail: reportsPanel === "kpis" ? "Lectura de desempeño y comparación mensual." : reportsPanel === "structure" ? "Diseño operativo de formularios y categorías." : "Conectores externos y continuidad de datos.",
+                  },
+                  {
+                    title: "Decisión",
+                    detail: reportsPanel === "kpis" ? "Detectar desvíos, priorizar focos y revisar cumplimiento." : reportsPanel === "structure" ? "Ordenar qué se audita, a quién y con qué obligatoriedad." : "Definir qué sale a Sheets y qué queda como fuente oficial.",
+                  },
+                  {
+                    title: "Acción",
+                    detail: reportsPanel === "kpis" ? "Usar filtros por puesto, persona y período." : reportsPanel === "structure" ? "Crear, editar y sincronizar plantillas por sucursal." : "Mantener URLs externas centralizadas y trazables.",
+                  },
+                ].map((item) => (
+                  <div key={item.title} className="rounded-[1.6rem] border border-slate-200 bg-white px-4 py-4 shadow-sm">
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">{item.title}</p>
+                    <p className="mt-2 text-sm font-medium leading-relaxed text-slate-600">{item.detail}</p>
+                  </div>
+                ))}
+              </div>
+
+              {reportsPanel === "integrations" && (
+              <>
+              <div className="bg-white/90 p-6 rounded-3xl shadow-sm border border-white/80 space-y-4 backdrop-blur">
+                <div>
+                  <h3 className="text-lg font-black text-slate-900">Configuración de integraciones</h3>
+                  <p className="text-sm text-slate-500">Centralizá las URLs externas para evitar hardcodes y simplificar el alta del sistema.</p>
+                </div>
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Endpoint Apps Script</label>
+                    <input
+                      type="url"
+                      value={webhookUrl}
+                      onChange={(e) => setWebhookUrl(e.target.value)}
+                      placeholder="https://script.google.com/macros/s/.../exec"
+                      className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-medium text-sm focus:outline-none"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">CSV publicado de Sheets</label>
+                    <input
+                      type="url"
+                      value={sheetCsvUrl}
+                      onChange={(e) => setSheetCsvUrl(e.target.value)}
+                      placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv"
+                      className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-medium text-sm focus:outline-none"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs text-slate-500">Podés precargar ambos valores desde variables Vite o guardarlos localmente desde esta pantalla.</p>
+                  <button
+                    onClick={saveIntegrationSettings}
+                    className="px-5 py-3 rounded-2xl bg-slate-900 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all"
                   >
-                    <Settings className="w-5 h-5" />
+                    Guardar configuración
                   </button>
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm">
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Apps Script</p>
+                  <p className="mt-2 text-lg font-black text-slate-900">{isSheetSyncConfigured ? "Conectado" : "Sin definir"}</p>
+                  <p className="mt-2 text-sm font-medium text-slate-500">Usado para espejar auditorías y automatizar el envío a Google Sheets.</p>
+                </div>
+                <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm">
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Historial externo</p>
+                  <p className="mt-2 text-lg font-black text-slate-900">{isHistorySyncConfigured ? "Disponible" : "Pendiente"}</p>
+                  <p className="mt-2 text-sm font-medium text-slate-500">Permite consumir el CSV publicado para respaldo operativo y análisis rápido.</p>
+                </div>
+                <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm">
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Modelo recomendado</p>
+                  <p className="mt-2 text-lg font-black text-slate-900">Fuente + espejo</p>
+                  <p className="mt-2 text-sm font-medium text-slate-500">Firestore como fuente de verdad y Sheets como capa operativa compartida.</p>
+                </div>
+              </div>
+              </>
+              )}
+
+              {reportsPanel === "structure" && (
+              <>
+
+              <div className="bg-white/90 p-6 rounded-3xl shadow-sm border border-white/80 space-y-6 backdrop-blur">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <h3 className="text-lg font-black text-slate-900">Estructura de auditoría</h3>
+                    <p className="text-sm text-slate-500">Creá categorías, definí personal auditable y administrá ítems obligatorios u opcionales.</p>
+                    <p className="text-[11px] font-bold text-slate-400 mt-2">
+                      Perfil activo: {selectedStructureScope === "global" ? "General" : selectedStructureScope} · Fuente actual: {structureStorageLabel === "cloud" ? "Firestore" : "Local"}
+                      {isLoadingStructureFromCloud && " · cargando nube..."}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleLoadStructureFromCloud}
+                      disabled={isLoadingStructureFromCloud}
+                      className="px-4 py-3 rounded-2xl bg-white text-slate-700 text-xs font-black uppercase tracking-widest border border-slate-200 hover:border-slate-300 transition-all disabled:opacity-60"
+                    >
+                      Cargar nube
+                    </button>
+                    <button
+                      onClick={handleSaveStructureToCloud}
+                      disabled={isSavingStructureToCloud}
+                      className="px-4 py-3 rounded-2xl bg-slate-900 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all disabled:opacity-60"
+                    >
+                      {isSavingStructureToCloud ? "Guardando..." : "Guardar en nube"}
+                    </button>
+                    <button
+                      onClick={handleResetStructure}
+                      className="px-4 py-3 rounded-2xl bg-slate-100 text-slate-700 text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition-all"
+                    >
+                      Restablecer base
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  {([
+                    { id: "global", label: "General" },
+                    { id: "Salta", label: "Salta" },
+                    { id: "Jujuy", label: "Jujuy" },
+                  ] as Array<{ id: AuditStructureScope; label: string }>).map((scopeOption) => (
+                    <button
+                      key={scopeOption.id}
+                      onClick={() => setSelectedStructureScope(scopeOption.id)}
+                      className={cn(
+                        "rounded-2xl border px-4 py-3 text-left transition-all",
+                        selectedStructureScope === scopeOption.id
+                          ? "bg-slate-950 text-white border-slate-950 shadow-lg shadow-slate-200"
+                          : "bg-white text-slate-700 border-slate-200 hover:border-slate-300"
+                      )}
+                    >
+                      <p className="text-[10px] font-black uppercase tracking-[0.18em]">Perfil</p>
+                      <p className="text-sm font-black mt-1">{scopeOption.label}</p>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
+                  <div className="space-y-4">
+                    <div className="rounded-[1.8rem] border border-slate-200 bg-slate-50 p-4 space-y-3">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1">Nueva categoría</label>
+                      <input
+                        type="text"
+                        value={newCategoryName}
+                        onChange={(e) => setNewCategoryName(e.target.value)}
+                        placeholder="Ej. Recepción rápida"
+                        className="w-full p-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none"
+                      />
+                      <textarea
+                        value={newCategoryStaff}
+                        onChange={(e) => setNewCategoryStaff(e.target.value)}
+                        placeholder="Personal separado por coma"
+                        className="w-full p-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none min-h-[90px] resize-none"
+                      />
+                      <button
+                        onClick={handleAddCategory}
+                        className="w-full py-3 rounded-2xl bg-slate-950 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all"
+                      >
+                        Crear categoría
+                      </button>
+                    </div>
+
+                    <div className="space-y-2">
+                      {auditCategories.map((category) => (
+                        <button
+                          key={category.id}
+                          onClick={() => setSelectedStructureCategoryId(category.id)}
+                          className={cn(
+                            "w-full text-left rounded-[1.6rem] border p-4 transition-all",
+                            selectedStructureCategoryId === category.id
+                              ? "bg-slate-950 text-white border-slate-950 shadow-lg shadow-slate-200"
+                              : "bg-white text-slate-800 border-slate-200 hover:border-slate-300"
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-black leading-tight">{category.name}</p>
+                              <p className={cn(
+                                "text-[11px] font-bold mt-1",
+                                selectedStructureCategoryId === category.id ? "text-slate-300" : "text-slate-500"
+                              )}>
+                                {category.items.length} ítems · {category.staffOptions.length} personas
+                              </p>
+                            </div>
+                            <span className={cn(
+                              "px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-[0.16em]",
+                              selectedStructureCategoryId === category.id ? "bg-white/10 text-white" : "bg-slate-100 text-slate-500"
+                            )}>
+                              {category.items.filter((item) => item.required).length} oblig.
+                            </span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {selectedStructureCategory && (
+                    <div className="space-y-4">
+                      <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 space-y-4">
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Categoría activa</p>
+                            <h4 className="text-lg font-black text-slate-900">{selectedStructureCategory.name}</h4>
+                          </div>
+                          <button
+                            onClick={() => handleDeleteCategory(selectedStructureCategory.id)}
+                            className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-red-50 text-red-600 text-xs font-black uppercase tracking-widest hover:bg-red-100 transition-all"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                            Eliminar categoría
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1">Nombre visible</label>
+                            <input
+                              type="text"
+                              value={selectedStructureCategory.name}
+                              onChange={(e) => updateCategory(selectedStructureCategory.id, (category) => ({ ...category, name: e.target.value }))}
+                              className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1">Personal auditable</label>
+                            <textarea
+                              value={selectedStructureCategory.staffOptions.join(", ")}
+                              onChange={(e) => updateCategory(selectedStructureCategory.id, (category) => ({
+                                ...category,
+                                staffOptions: e.target.value.split(",").map((value) => value.trim()).filter(Boolean),
+                              }))}
+                              className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none min-h-[104px] resize-none"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 space-y-4">
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div>
+                            <h4 className="text-lg font-black text-slate-900">Ítems de auditoría</h4>
+                            <p className="text-sm text-slate-500">Cada cambio impacta en el formulario dinámico y en las validaciones de cierre.</p>
+                          </div>
+                          <div className="rounded-2xl bg-slate-50 px-4 py-3 border border-slate-200">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Resumen</p>
+                            <p className="text-sm font-black text-slate-900">{selectedStructureCategory.items.length} ítems</p>
+                          </div>
+                        </div>
+
+                        <div className="rounded-[1.5rem] border border-dashed border-slate-300 bg-slate-50 p-4 space-y-3">
+                          <input
+                            type="text"
+                            value={newItemText}
+                            onChange={(e) => setNewItemText(e.target.value)}
+                            placeholder="Texto del nuevo ítem"
+                            className="w-full p-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none"
+                          />
+                          <label className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700">
+                            <input
+                              type="checkbox"
+                              checked={newItemRequired}
+                              onChange={(e) => setNewItemRequired(e.target.checked)}
+                              className="h-4 w-4 rounded border-slate-300"
+                            />
+                            Marcar como obligatorio
+                          </label>
+                          <button
+                            onClick={handleAddItem}
+                            className="w-full py-3 rounded-2xl bg-blue-600 text-white text-xs font-black uppercase tracking-widest hover:bg-blue-700 transition-all"
+                          >
+                            Agregar ítem
+                          </button>
+                        </div>
+
+                        <div className="space-y-3">
+                          {selectedStructureCategory.items.map((structureItem, index) => (
+                            <div key={structureItem.id} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4 space-y-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.16em] bg-slate-900 text-white">
+                                    Item {String(index + 1).padStart(2, "0")}
+                                  </span>
+                                  <span className={cn(
+                                    "text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.16em] border",
+                                    structureItem.required
+                                      ? "border-blue-200 bg-blue-50 text-blue-700"
+                                      : "border-slate-200 bg-white text-slate-500"
+                                  )}>
+                                    {structureItem.required ? "Obligatorio" : "Opcional"}
+                                  </span>
+                                </div>
+                                <button
+                                  onClick={() => updateCategory(selectedStructureCategory.id, (category) => ({
+                                    ...category,
+                                    items: category.items.filter((item) => item.id !== structureItem.id),
+                                  }))}
+                                  className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-red-50 text-red-600 text-[10px] font-black uppercase tracking-widest hover:bg-red-100 transition-all"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  Quitar
+                                </button>
+                              </div>
+
+                              <textarea
+                                value={structureItem.text}
+                                onChange={(e) => updateCategory(selectedStructureCategory.id, (category) => ({
+                                  ...category,
+                                  items: category.items.map((item) =>
+                                    item.id === structureItem.id ? { ...item, text: e.target.value } : item
+                                  ),
+                                }))}
+                                className="w-full p-4 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none min-h-[96px] resize-none"
+                              />
+
+                              <label className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={structureItem.required}
+                                  onChange={(e) => updateCategory(selectedStructureCategory.id, (category) => ({
+                                    ...category,
+                                    items: category.items.map((item) =>
+                                      item.id === structureItem.id ? { ...item, required: e.target.checked } : item
+                                    ),
+                                  }))}
+                                  className="h-4 w-4 rounded border-slate-300"
+                                />
+                                Este ítem debe responderse antes de finalizar la auditoría
+                              </label>
+                            </div>
+                          ))}
+
+                          {selectedStructureCategory.items.length === 0 && (
+                            <div className="rounded-[1.5rem] border border-dashed border-slate-300 bg-slate-50 p-6 text-center">
+                              <p className="text-sm font-bold text-slate-500">Esta categoría todavía no tiene ítems.</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              </>
+              )}
+
+              {reportsPanel === "kpis" && (
+              <>
               <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="space-y-1">
@@ -1380,7 +2752,7 @@ function AuditApp() {
                       onChange={(e) => setReportFilter({ ...reportFilter, role: e.target.value as Role })}
                       className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-sm font-bold"
                     >
-                      {Object.keys(AUDIT_QUESTIONS).map(r => <option key={r} value={r}>{r}</option>)}
+                      {auditCategories.map(category => <option key={category.id} value={category.name}>{category.name}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1">
@@ -1391,7 +2763,7 @@ function AuditApp() {
                       className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-sm font-bold"
                     >
                       <option value="">Todos</option>
-                      {Array.from(new Set(Object.values(STAFF).flat())).map(s => <option key={s} value={s}>{s}</option>)}
+                      {allStaffOptions.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1">
@@ -1415,13 +2787,7 @@ function AuditApp() {
                         <th className="p-2 border border-white/20 text-left min-w-[200px]">
                           {new Date(reportFilter.month + "-02").toLocaleString('es-ES', { month: 'long' }).toUpperCase()}
                         </th>
-                        {history
-                          .filter(s => 
-                            s.role === reportFilter.role && 
-                            (!reportFilter.staff || s.staffName === reportFilter.staff) &&
-                            s.date.startsWith(reportFilter.month)
-                          )
-                          .map(s => (
+                        {filteredReportSessions.map(s => (
                             <th key={s.id} className="p-2 border border-white/20 text-center min-w-[60px]">
                               {s.orderNumber || "S/N"}
                             </th>
@@ -1431,12 +2797,9 @@ function AuditApp() {
                       </tr>
                     </thead>
                     <tbody>
-                      {AUDIT_QUESTIONS[reportFilter.role]?.map((question, qIdx) => {
-                        const sessions = history.filter(s => 
-                          s.role === reportFilter.role && 
-                          (!reportFilter.staff || s.staffName === reportFilter.staff) &&
-                          s.date.startsWith(reportFilter.month)
-                        );
+                      {reportCategoryItems.map((questionItem, qIdx) => {
+                        const question = questionItem.text;
+                        const sessions = filteredReportSessions;
                         
                         const scores = sessions.map(s => {
                           const item = s.items.find(i => i.question === question);
@@ -1479,6 +2842,8 @@ function AuditApp() {
                   </table>
                 </div>
               </div>
+              </>
+              )}
             </motion.div>
           )}
           {view === "history" && (
@@ -1492,90 +2857,307 @@ function AuditApp() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <button 
-                    onClick={() => setView("home")}
+                    onClick={() => setView("dashboard")}
                     className="p-2 -ml-2 text-gray-400 hover:text-gray-900"
                   >
                     <ArrowLeft className="w-6 h-6" />
                   </button>
                   <h2 className="text-2xl font-bold">Historial</h2>
                 </div>
-                <button 
-                  onClick={exportToCSV}
-                  className="flex items-center gap-2 px-4 py-2 bg-green-50 text-green-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-green-100 transition-all"
-                >
-                  <Save className="w-4 h-4" />
-                  Exportar CSV
-                </button>
+                <div className="hidden md:flex items-center gap-2">
+                  <button
+                    onClick={() => setHistoryPanel("exports")}
+                    className="flex items-center gap-2 px-4 py-2 bg-white text-slate-700 rounded-xl border border-slate-200 font-bold text-xs uppercase tracking-widest hover:border-slate-300 transition-all"
+                  >
+                    <FileText className="w-4 h-4" />
+                    Exportación
+                  </button>
+                  <button 
+                    onClick={exportToCSV}
+                    className="flex items-center gap-2 px-4 py-2 bg-green-50 text-green-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-green-100 transition-all"
+                  >
+                    <Save className="w-4 h-4" />
+                    Exportar CSV
+                  </button>
+                </div>
               </div>
 
-              <div className="relative">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                <input 
-                  type="text" 
-                  placeholder="Buscar por asesor, OR o ubicación..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-12 pr-4 py-4 bg-white border border-gray-200 rounded-2xl text-sm focus:outline-none"
-                />
+              <div className="glass-panel rounded-[2rem] p-3 shadow-sm">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  <button
+                    onClick={() => setHistoryPanel("records")}
+                    className={cn(
+                      "rounded-[1.4rem] border px-4 py-4 text-left transition-all",
+                      historyPanel === "records"
+                        ? "border-slate-950 bg-slate-950 text-white"
+                        : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                    )}
+                  >
+                    <p className="text-sm font-black">Registros</p>
+                    <p className={cn("mt-1 text-xs font-bold", historyPanel === "records" ? "text-slate-300" : "text-slate-500")}>
+                      Vista operativa con búsqueda y lectura inmediata.
+                    </p>
+                  </button>
+                  <button
+                    onClick={() => setHistoryPanel("exports")}
+                    className={cn(
+                      "rounded-[1.4rem] border px-4 py-4 text-left transition-all",
+                      historyPanel === "exports"
+                        ? "border-slate-950 bg-slate-950 text-white"
+                        : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                    )}
+                  >
+                    <p className="text-sm font-black">Exportación y sync</p>
+                    <p className={cn("mt-1 text-xs font-bold", historyPanel === "exports" ? "text-slate-300" : "text-slate-500")}>
+                      Salida a CSV y control de fuente externa.
+                    </p>
+                  </button>
+                </div>
               </div>
 
-              <div className="space-y-3">
-                {history
-                  .filter(item => 
-                    item.staffName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    item.orderNumber?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    item.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    item.items[0]?.category.toLowerCase().includes(searchTerm.toLowerCase())
-                  )
-                  .map((item) => (
-                  <div key={item.id} className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className={cn(
-                          "w-14 h-14 rounded-2xl flex items-center justify-center font-bold text-xl",
-                          item.totalScore >= 90 ? "bg-green-50 text-green-600" : 
-                          item.totalScore >= 70 ? "bg-yellow-50 text-yellow-600" : "bg-red-50 text-red-600"
-                        )}>
-                          {item.totalScore}%
-                        </div>
-                        <div>
-                          <p className="font-black text-gray-900 leading-none mb-1">{item.location}</p>
-                          <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest">{item.date}</p>
+              {historyPanel === "records" && (
+                <>
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
+                    {[
+                      { label: "Resultados", value: filteredHistory.length, detail: "auditorías visibles", icon: ClipboardList, tone: "slate" },
+                      { label: "Promedio", value: `${historyAverageScore}%`, detail: "cumplimiento sobre la vista", icon: TrendingUp, tone: "emerald" },
+                      { label: "Desvíos", value: nonCompliantAudits, detail: "registros debajo de 90%", icon: AlertCircle, tone: "amber" },
+                      { label: "Último cierre", value: latestHistoryItem?.date ?? "-", detail: latestHistoryItem?.location ?? "sin datos", icon: Clock, tone: "blue" },
+                    ].map((card) => (
+                      <div key={card.label} className="glass-panel rounded-[1.7rem] p-5 shadow-sm">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">{card.label}</p>
+                            <p className="mt-3 text-2xl font-black text-slate-950">{card.value}</p>
+                            <p className="mt-2 text-sm font-medium text-slate-500">{card.detail}</p>
+                          </div>
+                          <div className={cn(
+                            "flex h-11 w-11 items-center justify-center rounded-2xl",
+                            card.tone === "slate" && "bg-slate-950 text-white",
+                            card.tone === "emerald" && "bg-emerald-50 text-emerald-600",
+                            card.tone === "amber" && "bg-amber-50 text-amber-600",
+                            card.tone === "blue" && "bg-blue-50 text-blue-600"
+                          )}>
+                            <card.icon className="w-5 h-5" />
+                          </div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mb-1">Auditado</p>
-                        <p className="text-xs font-black text-gray-700">
-                          {item.staffName || "N/A"}
-                        </p>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.15fr)_380px]">
+                    <div className="space-y-4">
+                      <div className="glass-panel rounded-[2rem] p-4 shadow-sm space-y-4">
+                        <div className="relative">
+                          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                          <input 
+                            type="text" 
+                            placeholder="Buscar por asesor, OR o ubicación..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full pl-12 pr-4 py-4 bg-white border border-gray-200 rounded-2xl text-sm focus:outline-none"
+                          />
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                          <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Lectura</p>
+                            <p className="mt-2 text-sm font-black text-slate-900">Listado maestro</p>
+                            <p className="mt-2 text-sm font-medium text-slate-500">Seleccioná un registro para abrir el detalle completo.</p>
+                          </div>
+                          <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Filtro</p>
+                            <p className="mt-2 text-sm font-black text-slate-900">Búsqueda unificada</p>
+                            <p className="mt-2 text-sm font-medium text-slate-500">Soporta asesor, categoría, ubicación y OR.</p>
+                          </div>
+                          <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Acción</p>
+                            <p className="mt-2 text-sm font-black text-slate-900">Exportar o sincronizar</p>
+                            <p className="mt-2 text-sm font-medium text-slate-500">Pasá a la segunda pestaña para salida y verificación externa.</p>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                    <div className="pt-4 border-t border-gray-50 flex items-center justify-between">
-                      <div className="flex flex-col">
-                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mb-1">
-                          {item.items[0]?.category || "General"}
-                        </span>
-                        {item.orderNumber && (
-                          <span className="text-xs font-black text-blue-600">OR: {item.orderNumber}</span>
+
+                      <div className="space-y-3">
+                        {filteredHistory.map((item) => (
+                          <button
+                            key={item.id}
+                            onClick={() => setSelectedAudit(item)}
+                            className={cn(
+                              "w-full rounded-[2rem] border p-5 text-left shadow-sm transition-all",
+                              selectedHistoryAudit?.id === item.id
+                                ? "border-slate-900 bg-slate-900 text-white"
+                                : "border-slate-200 bg-white hover:border-slate-300"
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="flex items-center gap-3 min-w-0">
+                                <div className={cn(
+                                  "w-14 h-14 rounded-2xl flex items-center justify-center font-bold text-xl shrink-0",
+                                  selectedHistoryAudit?.id === item.id
+                                    ? "bg-white/10 text-white"
+                                    : item.totalScore >= 90 ? "bg-green-50 text-green-600" : item.totalScore >= 70 ? "bg-yellow-50 text-yellow-600" : "bg-red-50 text-red-600"
+                                )}>
+                                  {item.totalScore}%
+                                </div>
+                                <div className="min-w-0">
+                                  <p className={cn("font-black leading-none mb-1 truncate", selectedHistoryAudit?.id === item.id ? "text-white" : "text-gray-900")}>{item.location}</p>
+                                  <p className={cn("text-[10px] font-black uppercase tracking-widest", selectedHistoryAudit?.id === item.id ? "text-slate-300" : "text-gray-400")}>{item.date}</p>
+                                  <p className={cn("mt-2 text-xs font-bold truncate", selectedHistoryAudit?.id === item.id ? "text-slate-200" : "text-gray-600")}>{item.staffName || "Sin responsable"}</p>
+                                </div>
+                              </div>
+                              <ChevronRight className={cn("w-5 h-5 shrink-0", selectedHistoryAudit?.id === item.id ? "text-white" : "text-slate-400")} />
+                            </div>
+                            <div className={cn("mt-4 flex items-center justify-between border-t pt-4", selectedHistoryAudit?.id === item.id ? "border-white/10" : "border-gray-100")}>
+                              <div className="flex flex-col">
+                                <span className={cn("text-[10px] font-black uppercase tracking-widest leading-none mb-1", selectedHistoryAudit?.id === item.id ? "text-slate-300" : "text-gray-400")}>
+                                  {item.items[0]?.category || "General"}
+                                </span>
+                                {item.orderNumber && (
+                                  <span className={cn("text-xs font-black", selectedHistoryAudit?.id === item.id ? "text-cyan-300" : "text-blue-600")}>OR: {item.orderNumber}</span>
+                                )}
+                              </div>
+                              <span className={cn("text-[10px] font-bold uppercase tracking-tighter", selectedHistoryAudit?.id === item.id ? "text-slate-300" : "text-gray-400")}>{item.items.length} ítems</span>
+                            </div>
+                          </button>
+                        ))}
+
+                        {filteredHistory.length === 0 && (
+                          <div className="rounded-[2rem] border border-dashed border-slate-300 bg-white px-5 py-10 text-center">
+                            <p className="text-sm font-black text-slate-700">No hay auditorías para ese criterio.</p>
+                            <p className="mt-2 text-sm font-medium text-slate-500">Probá con otro nombre, ubicación o categoría.</p>
+                          </div>
                         )}
                       </div>
-                      <span className="text-[10px] text-gray-400 font-bold uppercase tracking-tighter">{item.items.length} ítems auditados</span>
-                      <button 
-                        onClick={() => setSelectedAudit(item)}
-                        className="text-xs font-bold text-blue-600 underline"
-                      >
-                        Ver detalles
-                      </button>
                     </div>
-                    {item.notes && (
-                      <div className="p-3 bg-gray-50 rounded-xl">
-                        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Notas</p>
-                        <p className="text-xs text-gray-600 line-clamp-2 italic">"{item.notes}"</p>
-                      </div>
-                    )}
+
+                    <div className="space-y-4">
+                      {selectedHistoryAudit ? (
+                        <div className="glass-panel rounded-[2rem] p-6 shadow-sm space-y-5 xl:sticky xl:top-28">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Detalle seleccionado</p>
+                              <h3 className="mt-2 text-xl font-black text-slate-950">{selectedHistoryAudit.location}</h3>
+                              <p className="mt-1 text-xs font-bold uppercase tracking-widest text-slate-500">{selectedHistoryAudit.role || selectedHistoryAudit.items[0]?.category} · {selectedHistoryAudit.date}</p>
+                            </div>
+                            <div className={cn(
+                              "rounded-2xl px-4 py-3 text-lg font-black",
+                              selectedHistoryAudit.totalScore >= 90 ? "bg-green-50 text-green-600" : selectedHistoryAudit.totalScore >= 70 ? "bg-yellow-50 text-yellow-600" : "bg-red-50 text-red-600"
+                            )}>
+                              {selectedHistoryAudit.totalScore}%
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Personal</p>
+                              <p className="mt-2 text-sm font-black text-slate-900">{selectedHistoryAudit.staffName || "N/A"}</p>
+                            </div>
+                            <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
+                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Ubicación</p>
+                              <p className="mt-2 text-sm font-black text-slate-900">{selectedHistoryAudit.location}</p>
+                            </div>
+                            {selectedHistoryAudit.orderNumber && (
+                              <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4 col-span-2">
+                                <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Orden</p>
+                                <p className="mt-2 text-sm font-black text-blue-600">{selectedHistoryAudit.orderNumber}</p>
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Resultados por ítem</p>
+                            {selectedHistoryAudit.items.map((item, idx) => (
+                              <div key={idx} className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4 space-y-2">
+                                <div className="flex items-start justify-between gap-4">
+                                  <p className="text-xs font-bold leading-snug text-slate-700">{item.question}</p>
+                                  <span className={cn(
+                                    "shrink-0 rounded-lg px-2 py-1 text-[10px] font-black uppercase",
+                                    item.status === "pass" ? "bg-green-100 text-green-600" : item.status === "fail" ? "bg-red-100 text-red-600" : "bg-slate-200 text-slate-500"
+                                  )}>
+                                    {item.status === "pass" ? "Cumple" : item.status === "fail" ? "No cumple" : "N/A"}
+                                  </span>
+                                </div>
+                                {item.comment && <p className="text-[11px] italic text-slate-500">"{item.comment}"</p>}
+                              </div>
+                            ))}
+                          </div>
+
+                          {selectedHistoryAudit.notes && (
+                            <div className="rounded-[1.4rem] border border-blue-100 bg-blue-50 px-4 py-4">
+                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-400">Notas generales</p>
+                              <p className="mt-2 text-sm leading-relaxed text-blue-800">{selectedHistoryAudit.notes}</p>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="rounded-[2rem] border border-dashed border-slate-300 bg-white px-5 py-10 text-center">
+                          <p className="text-sm font-black text-slate-700">Seleccioná una auditoría para ver el detalle.</p>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                ))}
-              </div>
+                </>
+              )}
+
+              {historyPanel === "exports" && (
+                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+                  <div className="glass-panel rounded-[2rem] p-6 shadow-sm space-y-5">
+                    <div>
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Exportación</p>
+                      <h3 className="mt-2 text-xl font-black text-slate-950">Salida operativa y respaldo</h3>
+                      <p className="mt-2 text-sm font-medium text-slate-500">Modelo habitual en sistemas de auditoría: exportar para análisis puntual y sincronizar con una fuente compartida para reporting externo.</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div className="rounded-[1.6rem] border border-slate-200 bg-white p-5 space-y-3">
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">CSV local</p>
+                        <p className="text-sm font-medium text-slate-500">Descargá el historial para compartirlo, archivarlo o cruzarlo externamente.</p>
+                        <button 
+                          onClick={exportToCSV}
+                          className="inline-flex items-center gap-2 rounded-2xl bg-slate-950 px-4 py-3 text-xs font-black uppercase tracking-widest text-white hover:bg-slate-800 transition-all"
+                        >
+                          <Save className="w-4 h-4" />
+                          Exportar ahora
+                        </button>
+                      </div>
+                      <div className="rounded-[1.6rem] border border-slate-200 bg-white p-5 space-y-3">
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Fuente externa</p>
+                        <p className="text-sm font-medium text-slate-500">Leer el CSV publicado permite verificar consistencia y operación fuera de la app.</p>
+                        <button 
+                          onClick={syncData}
+                          disabled={isSyncing || !isHistorySyncConfigured}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-black uppercase tracking-widest text-slate-700 hover:border-slate-300 transition-all disabled:opacity-50"
+                        >
+                          <Clock className="w-4 h-4" />
+                          {isSyncing ? "Sincronizando..." : "Leer fuente"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="glass-panel rounded-[2rem] p-6 shadow-sm space-y-4">
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Buenas prácticas</p>
+                      <div className="space-y-3 text-sm font-medium text-slate-600">
+                        <p>Firestore como fuente oficial para trazabilidad y control.</p>
+                        <p>Sheets o CSV como capa de intercambio y reporting operativo.</p>
+                        <p>Exportación y sincronización separadas para evitar mezcla de responsabilidades.</p>
+                      </div>
+                    </div>
+                    <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm space-y-3">
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Estado actual</p>
+                      <div className="rounded-[1.4rem] bg-slate-50 px-4 py-4 border border-slate-200">
+                        <p className="text-sm font-black text-slate-900">CSV publicado</p>
+                        <p className="mt-2 text-sm font-medium text-slate-500">{isHistorySyncConfigured ? "Configurado para lectura externa." : "Todavía no configurado."}</p>
+                      </div>
+                      <div className="rounded-[1.4rem] bg-slate-50 px-4 py-4 border border-slate-200">
+                        <p className="text-sm font-black text-slate-900">Total de registros</p>
+                        <p className="mt-2 text-sm font-medium text-slate-500">{history.length} auditorías disponibles para exportar.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -1586,11 +3168,11 @@ function AuditApp() {
         onClose={() => setShowConfirmModal(false)}
         onConfirm={submitAudit}
         title="¿Finalizar Auditoría?"
-        message={`Faltan ${selectedRole ? (AUDIT_QUESTIONS[selectedRole]?.length - session.items.length) : 0} ítems por auditar. ¿Estás seguro de que deseas finalizar ahora?`}
+        message={`Quedan ${optionalPendingCount} ítems opcionales sin responder. ¿Deseás finalizar igualmente?`}
       />
 
       <AnimatePresence>
-        {selectedAudit && (
+        {selectedAudit && view !== "history" && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <motion.div 
               initial={{ opacity: 0 }}
@@ -1681,10 +3263,10 @@ function AuditApp() {
         )}
       </AnimatePresence>
 
-      {/* Bottom Navigation (Mobile Only & Audit View Desktop) */}
+      {/* Bottom Navigation (Mobile Only) */}
       <nav className={cn(
-        "fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-lg border-t border-slate-200 px-6 py-4 flex items-center justify-around z-50",
-        (view === "home" || view === "audit" || view === "setup") ? "flex" : "lg:hidden flex"
+        "fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-lg border-t border-slate-200 px-6 py-4 flex items-center justify-around z-50 lg:hidden",
+        (view === "home" || view === "audit" || view === "setup") ? "flex" : "hidden"
       )}>
         <button 
           onClick={() => setView("dashboard")}
@@ -1697,10 +3279,10 @@ function AuditApp() {
           <span className="text-[10px] font-black uppercase tracking-widest">Panel</span>
         </button>
         <button 
-          onClick={() => setView("home")}
+          onClick={startNewAudit}
           className={cn(
             "flex flex-col items-center gap-1 transition-all active:scale-90",
-            view === "home" ? "text-blue-600" : "text-slate-400"
+            (view === "setup" || view === "audit") ? "text-blue-600" : "text-slate-400"
           )}
         >
           <Plus className="w-6 h-6" />
@@ -1717,14 +3299,17 @@ function AuditApp() {
           <span className="text-[10px] font-black uppercase tracking-widest">Historial</span>
         </button>
         <button 
-          onClick={() => setView("reports")}
+          onClick={() => {
+            setReportsPanel("kpis");
+            setView("reports");
+          }}
           className={cn(
             "flex flex-col items-center gap-1 transition-all active:scale-90",
             view === "reports" ? "text-blue-600" : "text-slate-400"
           )}
         >
-          <BarChart3 className="w-6 h-6" />
-          <span className="text-[10px] font-black uppercase tracking-widest">KPIs</span>
+          <Settings className="w-6 h-6" />
+          <span className="text-[10px] font-black uppercase tracking-widest">Control</span>
         </button>
       </nav>
     </div>
