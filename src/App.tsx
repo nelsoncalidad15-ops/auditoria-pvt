@@ -13,20 +13,13 @@ import {
   ClipboardCheck, 
   MapPin, 
   User, 
-  Calendar as CalendarIcon, 
   ChevronRight, 
-  CheckCircle2, 
   XCircle, 
-  MinusCircle,
-  Camera,
   Save,
   History,
   Plus,
   ArrowLeft,
-  Search,
   Check,
-  LogOut,
-  LogIn,
   UserCheck,
   Wrench,
   ShieldCheck,
@@ -40,57 +33,43 @@ import {
   BarChart3,
   Settings,
   LayoutDashboard,
-  TrendingUp,
-  Users,
-  Target,
   AlertCircle,
-  Clock,
-  Trash2
+  Clock
 } from "lucide-react";
-import { 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer, 
-  AreaChart, 
-  Area, 
-  BarChart, 
-  Bar, 
-  Cell 
-} from 'recharts';
 import { motion, AnimatePresence } from "motion/react";
 import { cn, createClientId } from "./lib/utils";
 import { buildAuditSyncPayload, sendAuditToWebhook } from "./services/audit-sync";
-import { loadAuditCategoriesFromCloud, saveAuditCategoriesToCloud } from "./services/audit-structure-cloud";
-import { getStoredAuditCategories, resetAuditCategories, saveAuditCategories } from "./services/audit-structure";
+import { generateAuditPdfReport } from "./services/audit-report-pdf";
 import { 
   LOCATIONS, 
-  AUDITORS
+  AUDITORS,
+  OR_PARTICIPANTS,
+  OR_ROLE_LABELS
 } from "./constants";
-import { Role, AuditItem, AuditSession, Location, AuditCategory, AuditStructureScope } from "./types";
-import { 
-  auth, 
-  db, 
-  googleProvider, 
-  handleFirestoreError, 
-  OperationType 
-} from "./firebase";
+import { AuditSession, AuditTemplateItem, Location, OrResponsibleRole, Role } from "./types";
+import { buildOrderAuditItems, calculateAuditCompliance, calculateRoleScores } from "./services/or-audit";
+import { auth, googleProvider, isFirebaseConfigured } from "./firebase";
 import { 
   signInWithPopup, 
   signOut, 
   onAuthStateChanged, 
   User as FirebaseUser 
 } from "firebase/auth";
-import { 
-  collection, 
-  addDoc, 
-  query, 
-  orderBy, 
-  onSnapshot, 
-  Timestamp 
-} from "firebase/firestore";
 import Papa from "papaparse";
+import { AuditItemRow } from "./components/audit/AuditItemRow";
+import { Sidebar } from "./components/layout/Sidebar";
+import { Topbar } from "./components/layout/Topbar";
+import { HistoryView } from "./components/history/HistoryView";
+import { StructurePanel } from "./components/reports/StructurePanel";
+import { ControlKpisPanel } from "./components/reports/ControlKpisPanel";
+import { DashboardView } from "./components/views/DashboardView";
+import { Button } from "./components/ui/Button";
+import { AppModal } from "./components/ui/Modal";
+import { useDashboardMetrics } from "./hooks/useDashboardMetrics";
+import { useAuditDrafts } from "./hooks/useAuditDrafts";
+import { useHashNavigation } from "./hooks/useHashNavigation";
+import { useAuditStructure } from "./hooks/useAuditStructure";
+import { useAuditSync } from "./hooks/useAuditSync";
 
 function ErrorBoundary({ children }: { children: React.ReactNode }) {
   const [error, setError] = React.useState<any>(null);
@@ -132,263 +111,32 @@ function ErrorBoundary({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-interface AuditItemRowProps {
-  question: string;
-  index: number;
-  item?: AuditItem;
-  required?: boolean;
-  showStructuredQuestion?: boolean;
-  onStatusToggle: (status: "pass" | "fail" | "na") => void;
-  onCommentUpdate: (comment: string) => void;
+interface CompletedAuditReport {
+  role: Role;
+  session: AuditSession;
+  auditorName: string;
+  templateItems: AuditTemplateItem[];
 }
 
-interface ModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  onConfirm: () => void;
-  title: string;
-  message: string;
+function buildAuditBatchName(
+  location: Location,
+  dateValue: string | undefined,
+  existingBatchNames: Iterable<string>,
+  formatMonthLabel: (dateValue?: string) => string,
+) {
+  const resolvedDate = dateValue || new Date().toISOString().split("T")[0];
+  const nextIndex = new Set(Array.from(existingBatchNames).filter(Boolean)).size + 1;
+  return `Auditoria de procesos - ${location} - ${formatMonthLabel(resolvedDate)} (${nextIndex})`;
 }
-
-const Modal: React.FC<ModalProps> = ({ isOpen, onClose, onConfirm, title, message }) => {
-  return (
-    <AnimatePresence>
-      {isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={onClose}
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-          />
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.9, y: 20 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.9, y: 20 }}
-            className="relative bg-white rounded-[2.5rem] p-8 w-full max-w-sm shadow-2xl space-y-6"
-          >
-            <div className="space-y-2 text-center">
-              <h3 className="text-xl font-black text-gray-900 leading-tight">{title}</h3>
-              <p className="text-gray-500 text-sm leading-relaxed">{message}</p>
-            </div>
-            <div className="flex gap-3">
-              <button 
-                onClick={onClose}
-                className="flex-1 py-4 rounded-2xl font-bold text-gray-500 bg-gray-50 hover:bg-gray-100 transition-all"
-              >
-                Cancelar
-              </button>
-              <button 
-                onClick={() => {
-                  onConfirm();
-                  onClose();
-                }}
-                className="flex-1 py-4 rounded-2xl font-black text-white bg-blue-600 shadow-lg shadow-blue-100 hover:bg-blue-700 transition-all"
-              >
-                Confirmar
-              </button>
-            </div>
-          </motion.div>
-        </div>
-      )}
-    </AnimatePresence>
-  );
-};
-
-const AuditItemRow: React.FC<AuditItemRowProps> = ({ 
-  question, 
-  index, 
-  item, 
-  required = true,
-  showStructuredQuestion = false,
-  onStatusToggle, 
-  onCommentUpdate 
-}) => {
-  const [showComment, setShowComment] = useState(false);
-  const separatorIndex = question.indexOf(":");
-  const hasStructuredCopy = showStructuredQuestion && separatorIndex > -1;
-  const questionTitle = hasStructuredCopy ? question.slice(0, separatorIndex).trim() : question;
-  const questionHint = hasStructuredCopy ? question.slice(separatorIndex + 1).trim() : "";
-  const isOrdersStyle = showStructuredQuestion;
-  const currentStatusLabel =
-    item?.status === "pass" ? "Cumple" :
-    item?.status === "fail" ? "No cumple" :
-    item?.status === "na" ? "N/A" : "Pendiente";
-
-  return (
-    <motion.div 
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: index * 0.05 }}
-      className={cn(
-        "border transition-all duration-300 space-y-3",
-        isOrdersStyle
-          ? "bg-white rounded-[1.5rem] p-4 shadow-[0_16px_40px_rgba(15,23,42,0.05)] border-slate-200/80"
-          : "bg-white rounded-3xl p-6 shadow-sm",
-        item?.status
-          ? (isOrdersStyle ? "border-slate-300" : "border-gray-200")
-          : (isOrdersStyle ? "border-slate-200 ring-1 ring-slate-100" : "border-gray-100 ring-1 ring-gray-50")
-      )}
-    >
-      <div className="flex justify-between items-start gap-4">
-        <div className="space-y-1 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className={cn(
-              "text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.18em]",
-              isOrdersStyle ? "bg-slate-900 text-white" : "text-gray-400 bg-gray-100"
-            )}>
-              Item {String(index + 1).padStart(2, "0")}
-            </span>
-            <span className={cn(
-              "text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.16em] border",
-              item?.status === "pass" && "border-emerald-200 bg-emerald-50 text-emerald-700",
-              item?.status === "fail" && "border-red-200 bg-red-50 text-red-700",
-              item?.status === "na" && "border-slate-200 bg-slate-100 text-slate-600",
-              !item?.status && "border-amber-200 bg-amber-50 text-amber-700"
-            )}>
-              {currentStatusLabel}
-            </span>
-            <span className={cn(
-              "text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.16em] border",
-              required
-                ? "border-blue-200 bg-blue-50 text-blue-700"
-                : "border-slate-200 bg-slate-50 text-slate-500"
-            )}>
-              {required ? "Obligatorio" : "Opcional"}
-            </span>
-          </div>
-          <div className="space-y-1.5">
-            <p className={cn(
-              "leading-snug",
-              isOrdersStyle ? "font-black text-slate-900 text-[0.95rem] md:text-base tracking-[-0.02em]" : "font-bold text-gray-800 text-sm md:text-base"
-            )}>
-              {questionTitle}
-            </p>
-            {questionHint && (
-              <p className={cn(
-                "text-[11px] leading-snug rounded-xl px-3 py-2 border",
-                isOrdersStyle
-                  ? "text-slate-600 bg-slate-50 border-slate-200"
-                  : "text-gray-500 bg-slate-50 border-slate-100"
-              )}>
-                {questionHint}
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
-      
-      <div className={cn(
-        isOrdersStyle ? "grid grid-cols-3 gap-2.5" : "grid grid-cols-3 gap-2"
-      )}>
-        <button
-          onClick={() => onStatusToggle("pass")}
-          className={cn(
-            "flex items-center justify-center gap-2 rounded-2xl border-2 transition-all active:scale-95",
-            isOrdersStyle ? "py-2.5 px-2 min-h-[46px]" : "flex-col py-3.5",
-            item?.status === "pass" 
-              ? (isOrdersStyle ? "bg-emerald-600 border-emerald-600 text-white shadow-lg shadow-emerald-100" : "bg-green-500 border-green-500 text-white shadow-lg shadow-green-100")
-              : (isOrdersStyle ? "bg-white border-slate-200 text-slate-500 hover:border-emerald-300 hover:text-emerald-700" : "bg-white border-gray-100 text-gray-400 hover:border-green-200 hover:text-green-500")
-          )}
-        >
-          <CheckCircle2 className={cn("w-4 h-4", item?.status === "pass" ? "text-white" : "")} />
-          <span className="text-[10px] font-black uppercase tracking-tight">Cumple</span>
-        </button>
-        <button
-          onClick={() => onStatusToggle("fail")}
-          className={cn(
-            "flex items-center justify-center gap-2 rounded-2xl border-2 transition-all active:scale-95",
-            isOrdersStyle ? "py-2.5 px-2 min-h-[46px]" : "flex-col py-3.5",
-            item?.status === "fail" 
-              ? (isOrdersStyle ? "bg-red-600 border-red-600 text-white shadow-lg shadow-red-100" : "bg-red-500 border-red-500 text-white shadow-lg shadow-red-100")
-              : (isOrdersStyle ? "bg-white border-slate-200 text-slate-500 hover:border-red-300 hover:text-red-700" : "bg-white border-gray-100 text-gray-400 hover:border-red-200 hover:text-red-500")
-          )}
-        >
-          <XCircle className={cn("w-4 h-4", item?.status === "fail" ? "text-white" : "")} />
-          <span className="text-[10px] font-black uppercase tracking-tight">No Cumple</span>
-        </button>
-        <button
-          onClick={() => onStatusToggle("na")}
-          className={cn(
-            "flex items-center justify-center gap-2 rounded-2xl border-2 transition-all active:scale-95",
-            isOrdersStyle ? "py-2.5 px-2 min-h-[46px]" : "flex-col py-3.5",
-            item?.status === "na" 
-              ? (isOrdersStyle ? "bg-slate-700 border-slate-700 text-white shadow-lg shadow-slate-200" : "bg-gray-800 border-gray-800 text-white shadow-lg shadow-gray-200")
-              : (isOrdersStyle ? "bg-white border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-700" : "bg-white border-gray-100 text-gray-400 hover:border-gray-300 hover:text-gray-600")
-          )}
-        >
-          <MinusCircle className={cn("w-4 h-4", item?.status === "na" ? "text-white" : "")} />
-          <span className="text-[10px] font-black uppercase tracking-tight">N/A</span>
-        </button>
-      </div>
-
-      <div className={cn(
-        "flex gap-2 pt-1",
-        isOrdersStyle && "border-t border-slate-100 pt-3"
-      )}>
-        <button 
-          onClick={() => setShowComment(!showComment)}
-          className={cn(
-            "flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all",
-            item?.comment || showComment 
-              ? (isOrdersStyle ? "bg-slate-900 text-white ring-1 ring-slate-900" : "bg-blue-50 text-blue-600 ring-1 ring-blue-100")
-              : (isOrdersStyle ? "bg-slate-50 text-slate-500 hover:bg-slate-100 border border-slate-200" : "bg-gray-50 text-gray-400 hover:bg-gray-100")
-          )}
-        >
-          <History className="w-3.5 h-3.5" />
-          {item?.comment ? "Ver Observación" : "Agregar Nota"}
-        </button>
-        <button className={cn(
-          "flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all",
-          isOrdersStyle
-            ? "bg-slate-50 text-slate-400 border border-slate-200 hover:bg-slate-100"
-            : "bg-gray-50 text-gray-400 hover:bg-gray-100"
-        )}>
-          <Camera className="w-3.5 h-3.5" />
-          Adjuntar Foto
-        </button>
-      </div>
-
-      <AnimatePresence>
-        {(showComment || item?.comment) && (
-          <motion.div 
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden"
-          >
-            <div className="pt-1">
-              <textarea 
-                value={item?.comment || ""}
-                onChange={(e) => onCommentUpdate(e.target.value)}
-                placeholder="Escribe aquí las observaciones para este ítem..."
-                className={cn(
-                  "w-full bg-gray-50 border-2 border-gray-100 rounded-2xl text-xs focus:ring-0 focus:border-blue-200 resize-none transition-all",
-                  isOrdersStyle ? "p-3 h-20" : "p-4 h-24"
-                )}
-              />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
-  );
-};
 
 function AuditApp() {
   const appTitle = import.meta.env.VITE_APP_TITLE?.trim() || "Auditoría OR Postventa VW";
+  const contentContainerRef = React.useRef<HTMLDivElement | null>(null);
   const envWebhookUrl = import.meta.env.VITE_APPS_SCRIPT_URL?.trim() || "";
   const envSheetCsvUrl = import.meta.env.VITE_SHEET_CSV_URL?.trim() || "";
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [view, setView] = useState<"dashboard" | "home" | "setup" | "audit" | "history" | "reports">("dashboard");
-  const [selectedStructureScope, setSelectedStructureScope] = useState<AuditStructureScope>("global");
-  const [auditCategoryScopes, setAuditCategoryScopes] = useState<Record<AuditStructureScope, AuditCategory[]>>(() => ({
-    global: getStoredAuditCategories("global"),
-    Salta: getStoredAuditCategories("Salta"),
-    Jujuy: getStoredAuditCategories("Jujuy"),
-  }));
   const [isSyncing, setIsSyncing] = useState(false);
   const [session, setSession] = useState<Partial<AuditSession>>({
     date: new Date().toISOString().split("T")[0],
@@ -396,64 +144,247 @@ function AuditApp() {
   });
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
   const [selectedStaff, setSelectedStaff] = useState<string>("");
-  const [history, setHistory] = useState<AuditSession[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedAudit, setSelectedAudit] = useState<AuditSession | null>(null);
-  const [selectedStructureCategoryId, setSelectedStructureCategoryId] = useState("");
-  const [newCategoryName, setNewCategoryName] = useState("");
-  const [newCategoryStaff, setNewCategoryStaff] = useState("");
-  const [newItemText, setNewItemText] = useState("");
-  const [newItemRequired, setNewItemRequired] = useState(true);
-  const [isLoadingStructureFromCloud, setIsLoadingStructureFromCloud] = useState(false);
-  const [isSavingStructureToCloud, setIsSavingStructureToCloud] = useState(false);
-  const [structureStorageLabel, setStructureStorageLabel] = useState<"local" | "cloud">("local");
-  const [setupStep, setSetupStep] = useState<1 | 2 | 3>(1);
   const [reportsPanel, setReportsPanel] = useState<"kpis" | "structure" | "integrations">("kpis");
   const [historyPanel, setHistoryPanel] = useState<"records" | "exports">("records");
-  const [reportFilter, setReportFilter] = useState({
-    role: getStoredAuditCategories("global")[0]?.name || "Ordenes",
-    staff: "",
-    month: new Date().toISOString().slice(0, 7) // YYYY-MM
-  });
   const [webhookUrl, setWebhookUrl] = useState<string>(localStorage.getItem("webhookUrl") || envWebhookUrl);
   const [sheetCsvUrl, setSheetCsvUrl] = useState<string>(localStorage.getItem("sheetCsvUrl") || envSheetCsvUrl);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isSendingToSheet, setIsSendingToSheet] = useState(false);
+  const [isDashboardUnlocked, setIsDashboardUnlocked] = useState<boolean>(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    return window.sessionStorage.getItem("dashboardUnlocked") === "1";
+  });
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [focusedAuditItemId, setFocusedAuditItemId] = useState<string | null>(null);
+  const [completedAuditReports, setCompletedAuditReports] = useState<CompletedAuditReport[]>([]);
+  const [showBatchReportModal, setShowBatchReportModal] = useState(false);
+  const isFirebaseEnabled = isFirebaseConfigured && Boolean(auth) && Boolean(googleProvider);
+
+  const formatAuditMonthLabel = React.useCallback((dateValue?: string) => {
+    const parsedDate = dateValue ? new Date(`${dateValue}T00:00:00`) : new Date();
+    const monthLabel = new Intl.DateTimeFormat("es-AR", { month: "long" }).format(parsedDate).trim();
+    return monthLabel ? monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1) : "Mes";
+  }, []);
+
+  const ensureSessionIdentity = React.useCallback((currentSession: Partial<AuditSession>) => {
+    if (currentSession.id) {
+      return currentSession;
+    }
+
+    return {
+      ...currentSession,
+      id: createClientId(),
+      date: currentSession.date || new Date().toISOString().split("T")[0],
+    };
+  }, []);
 
   const sessionItems = session.items ?? [];
-  const ordersTargetPerAdvisor = 10;
-  const isSheetSyncConfigured = webhookUrl.trim().length > 0;
-  const isHistorySyncConfigured = sheetCsvUrl.trim().length > 0;
-  const auditCategories = auditCategoryScopes[selectedStructureScope] ?? auditCategoryScopes.global;
-  const activeAuditCategories = (session.location ? auditCategoryScopes[session.location] : null) ?? auditCategoryScopes.global;
-  const selectedAuditCategory = selectedRole
-    ? activeAuditCategories.find((category) => category.name === selectedRole) ?? null
-    : null;
-  const selectedAuditItems = selectedAuditCategory?.items ?? [];
+  const hasWebhookUrl = webhookUrl.trim().length > 0;
+  const hasSheetCsvUrl = sheetCsvUrl.trim().length > 0;
+  const isSheetSyncConfigured = hasWebhookUrl;
+  const isHistorySyncConfigured = hasWebhookUrl || hasSheetCsvUrl;
+  const {
+    history,
+    localAuditHistory,
+    isUsingExternalHistory,
+    historySyncModeLabel,
+    upsertLocalAuditHistory,
+    refreshExternalHistory,
+    prependExternalAudit,
+    saveToFirestore,
+  } = useAuditSync({
+    isAuthReady,
+    user,
+    hasWebhookUrl,
+    webhookUrl,
+    hasSheetCsvUrl,
+  });
+  const {
+    selectedStructureScope,
+    setSelectedStructureScope,
+    auditCategories,
+    selectedAuditCategory,
+    selectedStructureCategory,
+    selectedStructureCategoryId,
+    setSelectedStructureCategoryId,
+    isLoadingStructureFromCloud,
+    isSavingStructureToCloud,
+    structureStorageLabel,
+    reportFilter,
+    setReportFilter,
+    reportCategoryItems,
+    allStaffOptions,
+    configuredCategoryCount,
+    newCategoryName,
+    setNewCategoryName,
+    newCategoryDescription,
+    setNewCategoryDescription,
+    newCategoryStaff,
+    setNewCategoryStaff,
+    newItemText,
+    setNewItemText,
+    newItemDescription,
+    setNewItemDescription,
+    newItemBlock,
+    setNewItemBlock,
+    newItemSector,
+    setNewItemSector,
+    newItemResponsibleRoles,
+    setNewItemResponsibleRoles,
+    newItemPriority,
+    setNewItemPriority,
+    newItemGuidance,
+    setNewItemGuidance,
+    newItemRequired,
+    setNewItemRequired,
+    newItemAllowsNa,
+    setNewItemAllowsNa,
+    newItemWeight,
+    setNewItemWeight,
+    newItemActive,
+    setNewItemActive,
+    newItemRequiresCommentOnFail,
+    setNewItemRequiresCommentOnFail,
+    updateCategory,
+    handleAddCategory,
+    handleDeleteCategory,
+    handleAddItem,
+    handleResetStructure,
+    handleLoadStructureFromCloud,
+    handleSaveStructureToCloud,
+  } = useAuditStructure({
+    isAuthReady,
+    isCloudStructureAvailable: isFirebaseEnabled,
+    hasAuthenticatedUser: Boolean(user),
+    userEmail: user?.email,
+    selectedRole,
+    setSelectedRole,
+    setSelectedStaff,
+    sessionLocation: session.location,
+  });
+  const getQuestionOrder = (text: string) => {
+    const match = text.trim().match(/^(\d+)/);
+    return match ? Number.parseInt(match[1], 10) : Number.POSITIVE_INFINITY;
+  };
+  const selectedAuditItems = [...(selectedAuditCategory?.items ?? [])].sort((left, right) => {
+    const leftOrder = left.order ?? getQuestionOrder(left.text);
+    const rightOrder = right.order ?? getQuestionOrder(right.text);
+    if (leftOrder !== rightOrder) {
+      return leftOrder - rightOrder;
+    }
+
+    return left.text.localeCompare(right.text);
+  });
+  const isOrdersAudit = selectedRole === "Ordenes";
+  const sessionOrderItems = isOrdersAudit
+    ? buildOrderAuditItems(selectedAuditItems, sessionItems, selectedRole || "Ordenes")
+    : sessionItems;
   const selectedAuditStaffOptions = selectedAuditCategory?.staffOptions ?? [];
+  const sessionParticipants = session.participants ?? {
+    asesorServicio: "",
+    tecnico: "",
+    controller: "",
+    lavador: "",
+    repuestos: "",
+  };
+  const currentOrCompliance = isOrdersAudit
+    ? calculateAuditCompliance(sessionOrderItems)
+    : {
+        compliance: (() => {
+          const validItems = sessionItems.filter((item) => item.status !== "na");
+          if (validItems.length === 0) {
+            return 0;
+          }
+
+          const passItems = validItems.filter((item) => item.status === "pass");
+          return Math.round((passItems.length / validItems.length) * 100);
+        })(),
+        obtainedWeight: 0,
+        totalApplicableWeight: 0,
+        itemsCount: sessionItems.length,
+      };
+  const currentOrRoleScores = isOrdersAudit ? calculateRoleScores(sessionOrderItems) : [];
+  const ORDERS_TARGET_PER_ADVISOR = 10;
+  const ORDERS_TARGET_ADVISORS = 2;
+  const currentAuditBatchName = session.auditBatchName?.trim() || (session.location
+    ? buildAuditBatchName(
+        session.location,
+        session.date,
+        history
+          .filter((auditSession) => auditSession.location === session.location && auditSession.date.startsWith((session.date || "").slice(0, 7)) && auditSession.auditBatchName?.trim())
+          .map((auditSession) => auditSession.auditBatchName!.trim()),
+        formatAuditMonthLabel,
+      )
+    : "");
+  const sampledOrdersHistory = Array.from(
+    [...history, ...completedAuditReports.map((report) => report.session)]
+      .filter((auditSession) => auditSession.entityType === "or" && auditSession.auditBatchName?.trim() === currentAuditBatchName)
+      .reduce((acc, auditSession) => {
+        if (!acc.has(auditSession.id)) {
+          acc.set(auditSession.id, auditSession);
+        }
+        return acc;
+      }, new Map<string, AuditSession>())
+      .values()
+  );
+  const sampledOrdersByAdvisor = sampledOrdersHistory.reduce((acc, auditSession) => {
+    const advisorName = auditSession.participants?.asesorServicio?.trim() || auditSession.staffName?.trim();
+    if (!advisorName) {
+      return acc;
+    }
+
+    acc.set(advisorName, (acc.get(advisorName) ?? 0) + 1);
+    return acc;
+  }, new Map<string, number>());
+  const sampledOrdersProgress = Math.round(
+    (Array.from(sampledOrdersByAdvisor.values())
+      .sort((left, right) => right - left)
+      .slice(0, ORDERS_TARGET_ADVISORS)
+      .reduce((total, advisorCount) => total + Math.min(advisorCount, ORDERS_TARGET_PER_ADVISOR), 0)
+      / (ORDERS_TARGET_PER_ADVISOR * ORDERS_TARGET_ADVISORS || 1))
+      * 100
+  );
+  const {
+    rankingPanels,
+    recentMonthlyDashboardData,
+    recentAudits,
+    currentMonthDashboard,
+    monthlyCriticalAudits,
+    currentMonthRoleData,
+    currentMonthStaffData,
+    currentMonthRoleDistributionData,
+    currentMonthUniqueRoles,
+    currentMonthUniqueStaff,
+    dashboardDateLabel,
+    dashboardAlerts,
+  } = useDashboardMetrics(history);
   const selectedAuditorOption = AUDITORS.find((auditor) => auditor.id === session.auditorId) ?? null;
-  const selectedStructureCategory = auditCategories.find((category) => category.id === selectedStructureCategoryId) ?? null;
-  const reportCategoryItems = Array.from(new Map(
-    Object.values(auditCategoryScopes)
-      .flatMap((categories) => categories)
-      .filter((category) => category.name === reportFilter.role)
-      .map((category) => [category.id, category])
-  ).values())[0]?.items ?? [];
-  const allStaffOptions = Array.from(new Set(Object.values(auditCategoryScopes).flatMap((categories) => categories.flatMap((category) => category.staffOptions))));
-  const configuredCategoryCount = Array.from(new Set(Object.values(auditCategoryScopes).flatMap((categories) => categories.map((category) => category.name)))).length;
-  const requiredPendingCount = selectedAuditItems.filter(
-    (auditItem) => auditItem.required && !sessionItems.some((item) => item.question === auditItem.text && item.status)
-  ).length;
+  const auditBatchDisplayName = session.auditBatchName?.trim() || (session.location
+    ? buildAuditBatchName(
+        session.location,
+        session.date,
+        history
+          .filter((auditSession) => auditSession.location === session.location && auditSession.date.startsWith((session.date || "").slice(0, 7)) && auditSession.auditBatchName?.trim())
+          .map((auditSession) => auditSession.auditBatchName!.trim()),
+        formatAuditMonthLabel,
+      )
+    : "");
   const optionalPendingCount = selectedAuditItems.filter(
-    (auditItem) => !auditItem.required && !sessionItems.some((item) => item.question === auditItem.text && item.status)
+    (auditItem) => !sessionItems.some((item) => item.question === auditItem.text && item.status)
   ).length;
-  const currentMonth = new Date().toISOString().slice(0, 7);
-  const monthlyAudits = history.filter((audit) => audit.date?.startsWith(currentMonth));
-  const averageScore = Math.round(history.reduce((acc, audit) => acc + audit.totalScore, 0) / (history.length || 1));
-  const bestAuditScore = history.length > 0 ? Math.max(...history.map((audit) => audit.totalScore)) : 0;
-  const activeLocations = Array.from(new Set(history.map((audit) => audit.location).filter(Boolean))).length;
-  const recentAverageScore = Math.round(monthlyAudits.reduce((acc, audit) => acc + audit.totalScore, 0) / (monthlyAudits.length || 1));
-  const operatingStatus = user ? "Operativo" : "Acceso pendiente";
+  const failItemsWithoutCommentCount = selectedAuditItems.filter((auditItem) => {
+    if (!auditItem.requiresCommentOnFail) {
+      return false;
+    }
+
+    const answeredItem = sessionItems.find((item) => item.question === auditItem.text);
+    return answeredItem?.status === "fail" && !answeredItem.comment?.trim();
+  }).length;
   const controlPanels: Array<{
     id: "kpis" | "structure" | "integrations";
     label: string;
@@ -480,86 +411,12 @@ function AuditApp() {
     },
   ];
   const activeControlPanel = controlPanels.find((panel) => panel.id === reportsPanel) ?? controlPanels[0];
-  const activeViewLabel =
-    view === "dashboard"
-      ? "Inicio"
-      : view === "history"
-        ? "Historial"
-        : view === "reports"
-          ? "Control"
-          : view === "setup"
-            ? "Configuración"
-            : view === "audit"
-              ? "Auditoría"
-              : "Nueva auditoría";
-  const setupCompletionCount = [Boolean(session.auditorId), Boolean(session.location), Boolean(session.date)].filter(Boolean).length;
-  const operationalModules = [
-    {
-      title: "Nueva auditoría",
-      description: "Ir directo al alta de una revisión y asignar responsable.",
-      icon: Plus,
-      tone: "blue",
-      action: () => startNewAudit(),
-    },
-    {
-      title: "Historial",
-      description: "Consultar auditorías cerradas y revisar el detalle operativo.",
-      icon: History,
-      tone: "slate",
-      action: () => setView("history"),
-    },
-    {
-      title: "Indicadores",
-      description: "Entrar al tablero de control y medir cumplimiento.",
-      icon: TrendingUp,
-      tone: "emerald",
-      action: () => {
-        setReportsPanel("kpis");
-        setView("reports");
-      },
-    },
-    {
-      title: "Estructura",
-      description: "Editar plantillas, categorías y perfiles por sucursal.",
-      icon: Settings,
-      tone: "amber",
-      action: () => {
-        setReportsPanel("structure");
-        setView("reports");
-      },
-    },
-    {
-      title: "Integraciones",
-      description: "Centralizar conectores y sincronización externa.",
-      icon: ShieldCheck,
-      tone: "violet",
-      action: () => {
-        setReportsPanel("integrations");
-        setView("reports");
-      },
-    },
+  const sidebarItems = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "home", label: "Nueva Auditoría", icon: Plus },
+    { id: "history", label: "Historial", icon: History },
+    { id: "reports", label: "Control", icon: BarChart3 },
   ];
-
-  // Mock data for charts if no history exists
-  const chartData = history.length > 0 
-    ? history.slice(-7).map(h => ({ name: h.date.split("-")[2], score: h.totalScore }))
-    : [
-        { name: '01', score: 85 },
-        { name: '05', score: 92 },
-        { name: '10', score: 78 },
-        { name: '15', score: 88 },
-        { name: '20', score: 95 },
-        { name: '25', score: 90 },
-        { name: '30', score: 94 },
-      ];
-
-  const categoryData = [
-    { name: 'Mecánica', value: 92, color: '#3B82F6' },
-    { name: 'Lavadero', value: 88, color: '#10B981' },
-    { name: 'Ordenes', value: 95, color: '#F59E0B' },
-  ];
-
-  const recentAudits = history.slice(0, 3);
   const filteredHistory = history.filter((item) =>
     item.staffName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
     item.orderNumber?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -571,92 +428,169 @@ function AuditApp() {
     (!reportFilter.staff || sessionItem.staffName === reportFilter.staff) &&
     sessionItem.date.startsWith(reportFilter.month)
   );
-  const auditedOrdersForSelectedStaff = selectedRole === "Ordenes" && selectedStaff
-    ? history.filter((item) => item.role === "Ordenes" && item.staffName === selectedStaff).length
-    : 0;
-  const auditedOrdersProgress = Math.min(auditedOrdersForSelectedStaff / ordersTargetPerAdvisor, 1) * 100;
-  const auditedOrdersRemaining = Math.max(ordersTargetPerAdvisor - auditedOrdersForSelectedStaff, 0);
   const selectedHistoryAudit = view === "history" ? selectedAudit : null;
   const historyAverageScore = Math.round(filteredHistory.reduce((acc, item) => acc + item.totalScore, 0) / (filteredHistory.length || 1));
   const nonCompliantAudits = filteredHistory.filter((item) => item.totalScore < 90).length;
   const latestHistoryItem = filteredHistory[0] ?? null;
-  const nextPendingItemIndex = selectedRole
-    ? selectedAuditItems.findIndex(
-        (auditItem) => !sessionItems.some((item) => item.question === auditItem.text && item.status)
-      )
-    : -1;
 
-  useEffect(() => {
-    if (auditCategories.length === 0) {
-      setSelectedStructureCategoryId("");
-      return;
+  const resumeDraftSession = React.useCallback((draft: {
+    id: string;
+    date: string;
+    auditBatchName?: string;
+    auditorId?: string;
+    location?: Location;
+    staffName?: string;
+    role?: Role;
+    items: AuditSession["items"];
+    orderNumber?: string;
+    notes?: string;
+    participants?: AuditSession["participants"];
+  }) => {
+    setSession({
+      id: draft.id,
+      date: draft.date,
+      auditBatchName: draft.auditBatchName,
+      auditorId: draft.auditorId,
+      location: draft.location,
+      orderNumber: draft.orderNumber,
+      notes: draft.notes,
+      participants: draft.participants,
+      items: draft.items ?? [],
+    });
+    setSelectedRole(draft.role ?? null);
+    setSelectedStaff(draft.staffName ?? "");
+    setView(draft.role ? "audit" : "setup");
+  }, []);
+
+  const {
+    sortedDraftAudits,
+    removeDraftAudit,
+    resumeDraftAudit,
+  } = useAuditDrafts({
+    selectedRole,
+    selectedStaff,
+    session,
+    sessionItems,
+    view,
+    onResume: resumeDraftSession,
+  });
+
+  const createAuditBatchName = React.useCallback((location: Location, dateValue?: string) => {
+    const resolvedDate = dateValue || new Date().toISOString().split("T")[0];
+    const monthKey = resolvedDate.slice(0, 7);
+    return buildAuditBatchName(
+      location,
+      resolvedDate,
+      [...history, ...sortedDraftAudits]
+        .filter((auditSession) => auditSession.location === location && auditSession.date.startsWith(monthKey) && auditSession.auditBatchName?.trim())
+        .map((auditSession) => auditSession.auditBatchName!.trim()),
+      formatAuditMonthLabel,
+    );
+  }, [formatAuditMonthLabel, history, sortedDraftAudits]);
+
+  const ensureSessionMetadata = React.useCallback((currentSession: Partial<AuditSession>) => {
+    const sessionWithIdentity = ensureSessionIdentity(currentSession);
+    if (sessionWithIdentity.auditBatchName || !sessionWithIdentity.location) {
+      return sessionWithIdentity;
     }
 
-    if (!selectedStructureCategoryId || !auditCategories.some((category) => category.id === selectedStructureCategoryId)) {
-      setSelectedStructureCategoryId(auditCategories[0].id);
-    }
-
-    const allCategoryNames = Array.from(new Set(Object.values(auditCategoryScopes).flatMap((categories) => categories.map((category) => category.name))));
-
-    if (!allCategoryNames.includes(reportFilter.role)) {
-      setReportFilter((current) => ({ ...current, role: allCategoryNames[0] || current.role }));
-    }
-
-    if (selectedRole && !activeAuditCategories.some((category) => category.name === selectedRole)) {
-      setSelectedRole(null);
-      setSelectedStaff("");
-    }
-  }, [activeAuditCategories, auditCategories, auditCategoryScopes, reportFilter.role, selectedRole, selectedStructureCategoryId]);
-
-  useEffect(() => {
-    if (!isAuthReady || !user) {
-      setStructureStorageLabel("local");
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadStructure = async () => {
-      setIsLoadingStructureFromCloud(true);
-      try {
-        const scopeResults = await Promise.all([
-          loadAuditCategoriesFromCloud("global"),
-          loadAuditCategoriesFromCloud("Salta"),
-          loadAuditCategoriesFromCloud("Jujuy"),
-        ]);
-
-        if (cancelled) {
-          return;
-        }
-
-        const nextScopes: Record<AuditStructureScope, AuditCategory[]> = {
-          global: scopeResults[0] ?? getStoredAuditCategories("global"),
-          Salta: scopeResults[1] ?? getStoredAuditCategories("Salta"),
-          Jujuy: scopeResults[2] ?? getStoredAuditCategories("Jujuy"),
-        };
-
-        setAuditCategoryScopes(nextScopes);
-        saveAuditCategories(nextScopes.global, "global");
-        saveAuditCategories(nextScopes.Salta, "Salta");
-        saveAuditCategories(nextScopes.Jujuy, "Jujuy");
-        if (scopeResults.some(Boolean)) {
-          setStructureStorageLabel("cloud");
-        }
-      } catch (error) {
-        console.error("Load structure from cloud failed:", error);
-      } finally {
-        if (!cancelled) {
-          setIsLoadingStructureFromCloud(false);
-        }
-      }
+    return {
+      ...sessionWithIdentity,
+      auditBatchName: createAuditBatchName(sessionWithIdentity.location, sessionWithIdentity.date),
     };
+  }, [createAuditBatchName, ensureSessionIdentity]);
 
-    loadStructure();
+  const clearSelectedRole = React.useCallback(() => {
+    setSelectedRole(null);
+    setSelectedStaff("");
+  }, []);
+
+  const { handleTopbarBack } = useHashNavigation({
+    view,
+    reportsPanel,
+    selectedRole,
+    setView,
+    setReportsPanel,
+    clearSelectedRole,
+  });
+
+  const getAuditItemStatusLabel = (status?: "pass" | "fail" | "na") => {
+    if (status === "pass") return "Cumple";
+    if (status === "fail") return "No cumple";
+    if (status === "na") return "N/A";
+    return "Pendiente";
+  };
+
+  const getSectionScores = (templateItems: AuditTemplateItem[], auditSession: AuditSession) =>
+    Array.from(
+      templateItems.reduce((acc, item) => {
+        const blockName = item.block?.trim() || "General";
+        const current = acc.get(blockName) ?? [];
+        current.push(item);
+        acc.set(blockName, current);
+        return acc;
+      }, new Map<string, AuditTemplateItem[]>())
+    ).map(([sectionName, items]) => {
+      const answers = items.map((templateItem) => auditSession.items.find((sessionItem) => sessionItem.question === templateItem.text));
+      const passCount = answers.filter((answer) => answer?.status === "pass").length;
+      const failCount = answers.filter((answer) => answer?.status === "fail").length;
+      const naCount = answers.filter((answer) => answer?.status === "na").length;
+      const pendingCount = answers.filter((answer) => !answer).length;
+      const validCount = passCount + failCount;
+
+      return {
+        sectionName,
+        passCount,
+        failCount,
+        naCount,
+        pendingCount,
+        score: validCount > 0 ? Math.round((passCount / validCount) * 100) : 0,
+      };
+    });
+
+  useEffect(() => {
+    if (!focusedAuditItemId) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      const target = document.getElementById(`audit-item-${focusedAuditItemId}`);
+      if (!target) {
+        return;
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 180);
+
+    const clearId = window.setTimeout(() => setFocusedAuditItemId(null), 2600);
 
     return () => {
-      cancelled = true;
+      window.clearTimeout(timeoutId);
+      window.clearTimeout(clearId);
     };
-  }, [isAuthReady, user]);
+  }, [focusedAuditItemId]);
+
+  useEffect(() => {
+    setIsMobileNavOpen(false);
+  }, [view, reportsPanel]);
+
+  useEffect(() => {
+    if ((view === "setup" || view === "audit") && (!session.id || (session.location && !session.auditBatchName))) {
+      setSession((current) => ensureSessionMetadata(current));
+    }
+  }, [ensureSessionMetadata, session.auditBatchName, session.id, session.location, view]);
+
+  useEffect(() => {
+    contentContainerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [view, reportsPanel, selectedRole]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.sessionStorage.setItem("dashboardUnlocked", isDashboardUnlocked ? "1" : "0");
+  }, [isDashboardUnlocked]);
 
   useEffect(() => {
     if (view !== "history") {
@@ -674,166 +608,6 @@ function AuditApp() {
       setSelectedAudit(filteredHistory[0]);
     }
   }, [filteredHistory, selectedAudit, view]);
-
-  const persistAuditCategories = (nextCategories: AuditCategory[]) => {
-    setAuditCategoryScopes((current) => ({
-      ...current,
-      [selectedStructureScope]: nextCategories,
-    }));
-    saveAuditCategories(nextCategories, selectedStructureScope);
-    setStructureStorageLabel("local");
-  };
-
-  const updateCategory = (categoryId: string, updater: (category: AuditCategory) => AuditCategory) => {
-    const currentCategory = auditCategories.find((category) => category.id === categoryId);
-    if (!currentCategory) return;
-
-    const nextCategory = updater(currentCategory);
-    const nextCategories = auditCategories.map((category) =>
-      category.id === categoryId ? nextCategory : category
-    );
-
-    if (selectedRole === currentCategory.name && nextCategory.name !== currentCategory.name) {
-      setSelectedRole(nextCategory.name);
-    }
-
-    if (reportFilter.role === currentCategory.name && nextCategory.name !== currentCategory.name) {
-      setReportFilter((current) => ({ ...current, role: nextCategory.name }));
-    }
-
-    persistAuditCategories(nextCategories);
-  };
-
-  const handleAddCategory = () => {
-    const trimmedName = newCategoryName.trim();
-    if (!trimmedName) return;
-
-    if (auditCategories.some((category) => category.name.toLowerCase() === trimmedName.toLowerCase())) {
-      alert("Ya existe una categoría con ese nombre.");
-      return;
-    }
-
-    const newCategory: AuditCategory = {
-      id: createClientId(),
-      name: trimmedName,
-      staffOptions: newCategoryStaff.split(",").map((value) => value.trim()).filter(Boolean),
-      items: [],
-    };
-
-    const nextCategories = [...auditCategories, newCategory];
-    persistAuditCategories(nextCategories);
-    setSelectedStructureCategoryId(newCategory.id);
-    setNewCategoryName("");
-    setNewCategoryStaff("");
-  };
-
-  const handleDeleteCategory = (categoryId: string) => {
-    if (auditCategories.length === 1) {
-      alert("Necesitás al menos una categoría activa.");
-      return;
-    }
-
-    const categoryToDelete = auditCategories.find((category) => category.id === categoryId);
-    if (!categoryToDelete) return;
-
-    const nextCategories = auditCategories.filter((category) => category.id !== categoryId);
-    persistAuditCategories(nextCategories);
-
-    if (selectedStructureCategoryId === categoryId) {
-      setSelectedStructureCategoryId(nextCategories[0]?.id || "");
-    }
-
-    if (selectedRole === categoryToDelete.name) {
-      setSelectedRole(null);
-      setSelectedStaff("");
-    }
-
-    if (reportFilter.role === categoryToDelete.name) {
-      setReportFilter((current) => ({ ...current, role: nextCategories[0]?.name || current.role }));
-    }
-  };
-
-  const handleAddItem = () => {
-    if (!selectedStructureCategory) return;
-
-    const trimmedText = newItemText.trim();
-    if (!trimmedText) return;
-
-    updateCategory(selectedStructureCategory.id, (category) => ({
-      ...category,
-      items: [
-        ...category.items,
-        {
-          id: createClientId(),
-          text: trimmedText,
-          required: newItemRequired,
-        },
-      ],
-    }));
-
-    setNewItemText("");
-    setNewItemRequired(true);
-  };
-
-  const handleResetStructure = () => {
-    const defaults = resetAuditCategories(selectedStructureScope);
-    setAuditCategoryScopes((current) => ({
-      ...current,
-      [selectedStructureScope]: defaults,
-    }));
-    setSelectedStructureCategoryId(defaults[0]?.id || "");
-    setReportFilter((current) => ({ ...current, role: defaults[0]?.name || current.role }));
-    setStructureStorageLabel("local");
-    alert("Estructura restablecida a la configuración inicial.");
-  };
-
-  const handleLoadStructureFromCloud = async () => {
-    if (!user) {
-      alert("Iniciá sesión para cargar la estructura compartida desde Firestore.");
-      return;
-    }
-
-    setIsLoadingStructureFromCloud(true);
-    try {
-      const cloudCategories = await loadAuditCategoriesFromCloud(selectedStructureScope);
-      if (!cloudCategories) {
-        alert("Todavía no existe una estructura guardada en Firestore.");
-        return;
-      }
-
-      setAuditCategoryScopes((current) => ({
-        ...current,
-        [selectedStructureScope]: cloudCategories,
-      }));
-      saveAuditCategories(cloudCategories, selectedStructureScope);
-      setStructureStorageLabel("cloud");
-      alert("Estructura cargada desde Firestore.");
-    } catch (error) {
-      console.error("Manual cloud load failed:", error);
-      alert("No se pudo cargar la estructura desde Firestore.");
-    } finally {
-      setIsLoadingStructureFromCloud(false);
-    }
-  };
-
-  const handleSaveStructureToCloud = async () => {
-    if (!user) {
-      alert("Iniciá sesión para guardar la estructura en Firestore.");
-      return;
-    }
-
-    setIsSavingStructureToCloud(true);
-    try {
-      await saveAuditCategoriesToCloud(auditCategories, selectedStructureScope, user.email);
-      setStructureStorageLabel("cloud");
-      alert("Estructura guardada en Firestore.");
-    } catch (error) {
-      console.error("Save structure to cloud failed:", error);
-      alert("No se pudo guardar la estructura en Firestore.");
-    } finally {
-      setIsSavingStructureToCloud(false);
-    }
-  };
 
   const saveIntegrationSettings = () => {
     localStorage.setItem("webhookUrl", webhookUrl.trim());
@@ -874,39 +648,47 @@ function AuditApp() {
 
   // Auth Listener
   useEffect(() => {
+    if (!auth || !isFirebaseEnabled) {
+      setUser(null);
+      setIsAuthReady(true);
+      return;
+    }
+
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setUser(user);
       setIsAuthReady(true);
     });
     return () => unsubscribe();
-  }, []);
-
-  // Firestore History Listener
-  useEffect(() => {
-    if (!user || !isAuthReady) return;
-
-    const q = query(collection(db, "audits"), orderBy("date", "desc"));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const audits = snapshot.docs.map(doc => ({
-        ...doc.data(),
-        id: doc.id
-      })) as AuditSession[];
-      setHistory(audits);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, "audits");
-    });
-
-    return () => unsubscribe();
-  }, [user, isAuthReady]);
+  }, [isFirebaseEnabled]);
 
   const handleLogin = async () => {
+    if (!auth || !googleProvider || !isFirebaseEnabled) {
+      alert("Firebase está desactivado en este entorno. La app funciona en modo Google Sheets y almacenamiento local.");
+      return;
+    }
+
     if (isLoggingIn) return;
     setIsLoggingIn(true);
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (error: any) {
-      if (error.code !== 'auth/cancelled-popup-request' && error.code !== 'auth/popup-closed-by-user') {
-        console.error("Login failed:", error);
+      if (error.code === 'auth/cancelled-popup-request' || error.code === 'auth/popup-closed-by-user') {
+        setIsLoggingIn(false);
+        return;
+      }
+
+      console.error("Login failed:", error);
+
+      if (error.code === 'auth/popup-blocked') {
+        alert("El navegador bloqueó la ventana de acceso. Permití popups e intentá de nuevo.");
+      } else if (error.code === 'auth/unauthorized-domain') {
+        alert("Este dominio no está habilitado. Agregalo en Firebase Authentication > Settings > Authorized domains.");
+      } else if (error.code === 'auth/operation-not-allowed') {
+        alert("Google no está habilitado como método de acceso en Firebase Authentication.");
+      } else if (error.code === 'auth/invalid-api-key') {
+        alert("La configuración de Firebase es inválida. Revisá la API key del proyecto.");
+      } else {
+        alert("No se pudo iniciar sesión con Google. Revisá la configuración de Firebase Authentication.");
       }
     } finally {
       setIsLoggingIn(false);
@@ -914,6 +696,12 @@ function AuditApp() {
   };
 
   const handleLogout = async () => {
+    if (!auth || !isFirebaseEnabled) {
+      setUser(null);
+      setView("dashboard");
+      return;
+    }
+
     try {
       await signOut(auth);
       setView("dashboard");
@@ -922,46 +710,31 @@ function AuditApp() {
     }
   };
 
-  const saveToFirestore = async (newSession: AuditSession) => {
-    try {
-      await addDoc(collection(db, "audits"), {
-        ...newSession,
-        createdAt: Timestamp.now(),
-        userEmail: user?.email
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, "audits");
-    }
-  };
-
   const startNewAudit = () => {
+    setCompletedAuditReports([]);
+    setShowBatchReportModal(false);
+    setSelectedAudit(null);
     setSession({
       id: createClientId(),
       date: new Date().toISOString().split("T")[0],
+      auditBatchName: undefined,
+      participants: {
+        asesorServicio: "",
+        tecnico: "",
+        controller: "",
+        lavador: "",
+        repuestos: "",
+      },
       items: []
     });
-    setSetupStep(1);
     setSelectedRole(null);
     setSelectedStaff("");
     setView("setup");
   };
 
   const handleSetupSubmit = () => {
-    if (setupStep === 1) {
-      if (session.auditorId) {
-        setSetupStep(2);
-      }
-      return;
-    }
-
-    if (setupStep === 2) {
-      if (session.location) {
-        setSetupStep(3);
-      }
-      return;
-    }
-
-    if (session.auditorId && session.location && session.date) {
+    if (session.auditorId && session.location) {
+      setSession((current) => ensureSessionMetadata(current));
       setView("audit");
     }
   };
@@ -979,8 +752,18 @@ function AuditApp() {
   const handleAuditSubmit = () => {
     if (!selectedRole || !selectedAuditCategory) return;
 
-    if (requiredPendingCount > 0) {
-      alert(`Faltan ${requiredPendingCount} ítems obligatorios por responder.`);
+    if (selectedRole === "Ordenes" && !/^\d{6}$/.test(session.orderNumber?.trim() || "")) {
+      alert("Ingresá un número de OR válido de 6 dígitos.");
+      return;
+    }
+
+    if (selectedRole === "Ordenes" && !session.participants?.asesorServicio?.trim()) {
+      alert("Completá el asesor de servicio antes de cerrar la OR.");
+      return;
+    }
+
+    if (failItemsWithoutCommentCount > 0) {
+      alert(`Hay ${failItemsWithoutCommentCount} desvíos que requieren observación obligatoria antes del cierre.`);
       return;
     }
     
@@ -991,11 +774,8 @@ function AuditApp() {
     submitAudit();
   };
 
-  const resetAuditFlow = () => {
-    setIsSendingToSheet(false);
-    setView("dashboard");
-    setSelectedRole(null);
-    setSelectedStaff("");
+  const focusAuditItem = (auditItem: AuditTemplateItem) => {
+    setFocusedAuditItemId(auditItem.id);
   };
 
   const submitAudit = async () => {
@@ -1003,24 +783,30 @@ function AuditApp() {
 
     setIsSendingToSheet(true);
 
-    const validItems = sessionItems.filter(i => i.status !== "na");
-    const totalScore = validItems.length > 0 
-      ? (sessionItems.filter(i => i.status === "pass").length / validItems.length) * 100 
-      : 0;
+    const normalizedSession = ensureSessionMetadata(session);
+
+    const finalItems = isOrdersAudit ? sessionOrderItems : sessionItems;
+    const complianceMetrics = calculateAuditCompliance(finalItems);
+    const roleScores = isOrdersAudit ? calculateRoleScores(finalItems) : [];
 
     const completeSession: AuditSession = {
-      ...session as AuditSession,
-      staffName: selectedStaff,
+      ...normalizedSession as AuditSession,
+      staffName: selectedRole === "Ordenes" ? session.participants?.asesorServicio || selectedStaff : selectedStaff,
       role: selectedRole!,
-      totalScore: Math.round(totalScore)
+      orderNumber: selectedRole === "Ordenes" ? session.orderNumber?.trim() || undefined : undefined,
+      totalScore: complianceMetrics.compliance,
+      items: finalItems,
+      participants: session.participants,
+      roleScores,
+      entityType: selectedRole === "Ordenes" ? "or" : "general",
     };
 
     const auditorName = AUDITORS.find((auditor) => auditor.id === completeSession.auditorId)?.name || "N/A";
+    let savedRemotely = false;
+    let syncWarning: string | null = null;
 
     try {
-      await saveToFirestore(completeSession);
-
-      if (isSheetSyncConfigured) {
+      if (hasWebhookUrl) {
         const payload = buildAuditSyncPayload({
           session: completeSession,
           auditorName,
@@ -1028,81 +814,268 @@ function AuditApp() {
         });
 
         await sendAuditToWebhook(webhookUrl, payload);
-        alert("✅ Auditoría guardada en Firestore y enviada a Google Sheets");
-      } else {
-        alert("✅ Auditoría guardada en Firestore");
+        prependExternalAudit(completeSession);
+        void refreshExternalHistory().catch((refreshError) => {
+          console.error("External history refresh after submit failed:", refreshError);
+        });
+        savedRemotely = true;
       }
 
-      resetAuditFlow();
+      if (user && isFirebaseEnabled) {
+        try {
+          await saveToFirestore(completeSession);
+          savedRemotely = true;
+        } catch (error) {
+          console.error("Firestore secondary save failed:", error);
+          if (!hasWebhookUrl) {
+            throw error;
+          }
+          syncWarning = "La auditoría se envió, pero no quedó guardada en la persistencia secundaria.";
+        }
+      }
+
+      if (!savedRemotely) {
+        upsertLocalAuditHistory(completeSession);
+      }
+
+      setCompletedAuditReports((current) => [
+        {
+          role: completeSession.role || selectedRole!,
+          session: completeSession,
+          auditorName,
+          templateItems: selectedAuditItems,
+        },
+        ...current.filter((report) => report.role !== (completeSession.role || selectedRole!)),
+      ]);
+
+      if (session.id) {
+        removeDraftAudit(session.id);
+      }
+
+      setShowConfirmModal(false);
+      setIsSendingToSheet(false);
+      setSelectedRole(null);
+      setSelectedStaff("");
+      setView("audit");
+      setSession({
+        id: createClientId(),
+        date: completeSession.date,
+        auditBatchName: completeSession.auditBatchName,
+        auditorId: completeSession.auditorId,
+        location: completeSession.location,
+        participants: isOrdersAudit ? {
+          asesorServicio: "",
+          tecnico: "",
+          controller: "",
+          lavador: "",
+          repuestos: "",
+        } : undefined,
+        items: [],
+      });
+
+      if (!savedRemotely) {
+        alert("Auditoría guardada en este dispositivo.");
+      } else if (syncWarning) {
+        alert(syncWarning);
+      } else if (hasWebhookUrl) {
+        alert("Auditoría guardada correctamente.");
+      }
     } catch (error) {
       console.error("Submit audit failed:", error);
 
-      if (isSheetSyncConfigured) {
-        alert("⚠️ La auditoría se intentó guardar, pero falló la sincronización con Google Sheets. Revisá la URL del Apps Script.");
-      } else {
-        alert("⚠️ No se pudo guardar la auditoría. Verificá tu acceso a Firebase y reintentá.");
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      upsertLocalAuditHistory(completeSession);
+
+      setCompletedAuditReports((current) => [
+        {
+          role: completeSession.role || selectedRole!,
+          session: completeSession,
+          auditorName,
+          templateItems: selectedAuditItems,
+        },
+        ...current.filter((report) => report.role !== (completeSession.role || selectedRole!)),
+      ]);
+
+      if (session.id) {
+        removeDraftAudit(session.id);
       }
 
+      setShowConfirmModal(false);
       setIsSendingToSheet(false);
+      setSelectedRole(null);
+      setSelectedStaff("");
+      setView("audit");
+      setSession({
+        id: createClientId(),
+        date: completeSession.date,
+        auditBatchName: completeSession.auditBatchName,
+        auditorId: completeSession.auditorId,
+        location: completeSession.location,
+        participants: isOrdersAudit ? {
+          asesorServicio: "",
+          tecnico: "",
+          controller: "",
+          lavador: "",
+          repuestos: "",
+        } : undefined,
+        items: [],
+      });
+
+      if (isFirebaseEnabled && (errorMessage.includes("Missing or insufficient permissions") || errorMessage.includes("insufficient permissions"))) {
+        const shouldLogin = window.confirm("Se guardó en este dispositivo. Firebase rechazó el acceso. ¿Querés iniciar sesión con Google ahora?");
+        if (shouldLogin) {
+          void handleLogin();
+        }
+        return;
+      }
+
+      if (isFirebaseEnabled && errorMessage.includes("authInfo") && errorMessage.includes('"userId":undefined')) {
+        const shouldLogin = window.confirm("Se guardó en este dispositivo. No hay una sesión activa. ¿Querés iniciar sesión con Google ahora?");
+        if (shouldLogin) {
+          void handleLogin();
+        }
+        return;
+      }
+
+      if (hasWebhookUrl) {
+        alert(`No se pudo enviar la auditoría a Apps Script. Se guardó en este dispositivo.\n\nDetalle: ${errorMessage}`);
+        return;
+      }
+
+      alert("La auditoría se guardó en este dispositivo.");
     }
   };
 
   const toggleItemStatus = (question: string, status: "pass" | "fail" | "na") => {
     const existingIndex = session.items?.findIndex(i => i.question === question) ?? -1;
     const newItems = [...(session.items ?? [])];
+    const currentItemIndex = selectedAuditItems.findIndex((auditItem) => auditItem.text === question);
+    const templateItem = selectedAuditItems.find((auditItem) => auditItem.text === question);
     
     if (existingIndex >= 0) {
       newItems[existingIndex] = { ...newItems[existingIndex], status };
     } else {
       newItems.push({
-        id: createClientId(),
+        id: templateItem?.id || createClientId(),
         question,
         category: selectedRole!,
         status,
-        comment: ""
+        comment: "",
+        description: templateItem?.description,
+        responsibleRoles: templateItem?.responsibleRoles,
+        sector: templateItem?.sector,
+        weight: templateItem?.weight,
+        allowsNa: templateItem?.allowsNa,
       });
     }
     
     setSession({ ...session, items: newItems });
+
+    const nextItem = currentItemIndex >= 0 ? selectedAuditItems[currentItemIndex + 1] : null;
+    if (nextItem) {
+      focusAuditItem(nextItem);
+    }
   };
 
   const updateItemComment = (question: string, comment: string) => {
     const existingIndex = session.items?.findIndex(i => i.question === question) ?? -1;
     const newItems = [...(session.items ?? [])];
+    const templateItem = selectedAuditItems.find((auditItem) => auditItem.text === question);
     
     if (existingIndex >= 0) {
       newItems[existingIndex] = { ...newItems[existingIndex], comment };
     } else {
       newItems.push({
-        id: createClientId(),
+        id: templateItem?.id || createClientId(),
         question,
         category: selectedRole!,
         status: "na",
-        comment
+        comment,
+        description: templateItem?.description,
+        responsibleRoles: templateItem?.responsibleRoles,
+        sector: templateItem?.sector,
+        weight: templateItem?.weight,
+        allowsNa: templateItem?.allowsNa,
       });
     }
     
     setSession({ ...session, items: newItems });
   };
 
+  const updateItemPhoto = (question: string, photoUrl?: string) => {
+    const existingIndex = session.items?.findIndex(i => i.question === question) ?? -1;
+    const newItems = [...(session.items ?? [])];
+    const templateItem = selectedAuditItems.find((auditItem) => auditItem.text === question);
+
+    if (existingIndex >= 0) {
+      newItems[existingIndex] = { ...newItems[existingIndex], photoUrl };
+    } else {
+      newItems.push({
+        id: templateItem?.id || createClientId(),
+        question,
+        category: selectedRole!,
+        status: "na",
+        comment: "",
+        description: templateItem?.description,
+        responsibleRoles: templateItem?.responsibleRoles,
+        sector: templateItem?.sector,
+        weight: templateItem?.weight,
+        allowsNa: templateItem?.allowsNa,
+        photoUrl,
+      });
+    }
+
+    setSession({ ...session, items: newItems });
+  };
+
   const syncData = async () => {
     if (!isHistorySyncConfigured) {
-      alert("Configura la URL pública CSV de Google Sheets para sincronizar datos.");
+      alert("Configurá Apps Script o una URL CSV publicada para sincronizar datos.");
       return;
     }
 
     setIsSyncing(true);
     try {
+      if (hasWebhookUrl) {
+        const externalAudits = await refreshExternalHistory();
+        alert(
+          externalAudits.length > 0
+            ? `Historial cargado desde Google Sheets. Se importaron ${externalAudits.length} auditorías.`
+            : "La fuente externa respondió correctamente, pero no encontró auditorías para importar."
+        );
+        setIsSyncing(false);
+        return;
+      }
+
       const response = await fetch(sheetCsvUrl);
+      if (!response.ok) {
+        throw new Error(`No se pudo leer la fuente externa (${response.status}).`);
+      }
+
       const csvText = await response.text();
       Papa.parse(csvText, {
+        header: true,
+        skipEmptyLines: true,
         complete: (results) => {
-          console.log("Parsed CSV:", results.data);
-          setTimeout(() => setIsSyncing(false), 1000);
+          const rows = Array.isArray(results.data)
+            ? results.data.filter((row) => Object.values((row ?? {}) as Record<string, unknown>).some(Boolean))
+            : [];
+
+          if (results.errors.length > 0) {
+            console.error("CSV parse failed:", results.errors);
+            alert("La fuente CSV respondió, pero tiene un formato inválido o incompleto.");
+            setIsSyncing(false);
+            return;
+          }
+
+          alert(`CSV externo verificado. Se leyeron ${rows.length} registros publicados.`);
+          setIsSyncing(false);
         }
       });
     } catch (error) {
       console.error("Sync failed:", error);
+      alert("No se pudo leer la fuente CSV publicada. Revisá la URL y el acceso público.");
       setIsSyncing(false);
     }
   };
@@ -1116,222 +1089,54 @@ function AuditApp() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#F5F7FA] via-[#EEF3F8] to-[#E6EDF6] lg:flex">
-      {/* Sidebar - Desktop Only */}
-      <aside className={cn(
-        "hidden h-[100dvh] w-72 shrink-0 flex-col overflow-hidden bg-slate-900 text-white shadow-2xl transition-all duration-500 lg:sticky lg:top-0 z-50",
-        (view === "dashboard" || view === "history" || view === "reports") ? "lg:flex" : "lg:hidden"
-      )}>
-        <div className="p-8 flex items-center gap-3">
-          <div className="bg-blue-600 p-2.5 rounded-2xl shadow-lg shadow-blue-500/20">
-            <ClipboardCheck className="text-white w-6 h-6" />
-          </div>
-          <div>
-            <h1 className="font-black text-lg tracking-tight leading-none">{appTitle}</h1>
-            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Postventa v2.0</p>
-          </div>
-        </div>
+    <div className="app-shell min-h-screen lg:flex">
+      <Sidebar
+        appTitle={appTitle}
+        show={(view === "dashboard" && isDashboardUnlocked) || view === "history" || view === "reports"}
+        view={view}
+        reportsPanel={reportsPanel}
+        isMobileOpen={isMobileNavOpen}
+        items={sidebarItems}
+        user={user}
+        onNavigate={(id) => {
+          if (id === "home") {
+            startNewAudit();
+            return;
+          }
 
-        <nav className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-2 sidebar-scroll">
-          <div className="px-4 pb-2">
-            <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Operación</p>
-          </div>
-          {[
-            { id: "dashboard", label: "Inicio", icon: LayoutDashboard },
-            { id: "home", label: "Nueva Auditoría", icon: Plus },
-            { id: "history", label: "Historial", icon: History },
-            { id: "reports", label: "Control", icon: BarChart3 },
-          ].map((item) => (
-            <button
-              key={item.id}
-              onClick={() => {
-                if (item.id === "home") {
-                  startNewAudit();
-                  return;
-                }
+          if (id === "reports") {
+            setReportsPanel("kpis");
+          }
 
-                if (item.id === "reports") {
-                  setReportsPanel("kpis");
-                }
+          setView(id as typeof view);
+        }}
+        onReportsPanelChange={(panel) => {
+          setReportsPanel(panel);
+          setView("reports");
+        }}
+        onMobileClose={() => setIsMobileNavOpen(false)}
+        onLogout={handleLogout}
+      />
 
-                setView(item.id as any);
-              }}
-              className={cn(
-                "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm transition-all group",
-                (item.id === "home" ? (view === "setup" || view === "audit") : view === item.id)
-                  ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" 
-                  : "text-slate-400 hover:text-white hover:bg-slate-800"
-              )}
-            >
-              <item.icon className={cn(
-                "w-5 h-5 transition-transform group-hover:scale-110",
-                (item.id === "home" ? (view === "setup" || view === "audit") : view === item.id) ? "text-white" : "text-slate-500"
-              )} />
-              {item.label}
-              {(item.id === "home" ? (view === "setup" || view === "audit") : view === item.id) && (
-                <motion.div 
-                  layoutId="activeTab"
-                  className="ml-auto w-1.5 h-1.5 bg-white rounded-full"
-                />
-              )}
-            </button>
-          ))}
-          
-          <div className="pt-8 pb-4 px-4">
-            <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Suite de control</p>
-          </div>
-
-          <button
-            onClick={() => {
-              setReportsPanel("kpis");
-              setView("reports");
-            }}
-            className={cn(
-              "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm transition-all",
-              view === "reports" && reportsPanel === "kpis"
-                ? "bg-slate-800 text-white"
-                : "text-slate-400 hover:text-white hover:bg-slate-800"
-            )}
-          >
-            <TrendingUp className={cn("w-5 h-5", view === "reports" && reportsPanel === "kpis" ? "text-white" : "text-slate-500")} />
-            Indicadores
-          </button>
-          <button className="w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm text-slate-400 hover:text-white hover:bg-slate-800 transition-all opacity-50 cursor-not-allowed">
-            <Users className="w-5 h-5 text-slate-500" />
-            Gestión Personal
-          </button>
-          <button
-            onClick={() => {
-              setReportsPanel("structure");
-              setView("reports");
-            }}
-            className={cn(
-              "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm transition-all",
-              view === "reports" && reportsPanel === "structure"
-                ? "bg-slate-800 text-white"
-                : "text-slate-400 hover:text-white hover:bg-slate-800"
-            )}
-          >
-            <Settings className={cn("w-5 h-5", view === "reports" && reportsPanel === "structure" ? "text-white" : "text-slate-500")} />
-            Estructura
-          </button>
-          <button
-            onClick={() => {
-              setReportsPanel("integrations");
-              setView("reports");
-            }}
-            className={cn(
-              "w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl font-bold text-sm transition-all",
-              view === "reports" && reportsPanel === "integrations"
-                ? "bg-slate-800 text-white"
-                : "text-slate-400 hover:text-white hover:bg-slate-800"
-            )}
-          >
-            <ShieldCheck className={cn("w-5 h-5", view === "reports" && reportsPanel === "integrations" ? "text-white" : "text-slate-500")} />
-            Integraciones
-          </button>
-        </nav>
-
-        <div className="p-6 pt-4 border-t border-slate-800/80 bg-slate-900/95 backdrop-blur-sm">
-          {user ? (
-            <div className="bg-slate-800/50 rounded-3xl p-4 border border-slate-700/50">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center font-black text-sm shadow-lg shadow-blue-600/20">
-                  {user.displayName?.charAt(0) || "U"}
-                </div>
-                <div className="overflow-hidden">
-                  <p className="text-xs font-black text-white truncate">{user.displayName}</p>
-                  <p className="text-[10px] font-bold text-slate-500 truncate">{user.email}</p>
-                </div>
-              </div>
-              <button 
-                onClick={handleLogout}
-                className="w-full flex items-center justify-center gap-2 py-2.5 bg-slate-700 hover:bg-red-500/10 hover:text-red-500 rounded-xl text-xs font-black uppercase tracking-widest transition-all"
-              >
-                <LogOut className="w-4 h-4" />
-                Cerrar Sesión
-              </button>
-            </div>
-          ) : (
-            <div className="rounded-3xl border border-slate-700/50 bg-slate-800/30 p-4">
-              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Acceso</p>
-              <p className="mt-2 text-sm font-bold text-slate-300">El ingreso se realiza desde la barra superior.</p>
-            </div>
-          )}
-        </div>
-      </aside>
-
-      <div className="flex-1 flex flex-col h-screen overflow-y-auto">
-        {/* Header - Mobile & Desktop Top Bar */}
-        <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 px-6 py-4 sticky top-0 z-40">
-          <div className={cn(
-            "mx-auto flex items-center justify-between",
-            view === "dashboard" ? "max-w-7xl" : 
-            view === "setup" ? "max-w-5xl" :
-            view === "audit" ? "max-w-6xl" :
-            view === "home" ? "max-w-md" :
-            "max-w-md lg:max-w-none"
-          )}>
-            <div className={cn(
-              "flex items-center gap-3",
-              (view === "home" || view === "audit" || view === "setup") ? "flex" : "lg:hidden flex"
-            )}>
-              <div className="bg-blue-600 p-2 rounded-xl">
-                <ClipboardCheck className="text-white w-5 h-5" />
-              </div>
-              <h1 className="font-black text-sm tracking-tight leading-none uppercase">{appTitle}</h1>
-            </div>
-            
-            <div className={cn(
-              "hidden min-w-0",
-              (view === "dashboard" || view === "history" || view === "reports") ? "lg:block" : "lg:hidden"
-            )}>
-              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">
-                <span>{activeViewLabel}</span>
-                {view === "reports" && (
-                  <>
-                    <ChevronRight className="h-3.5 w-3.5 text-slate-300" />
-                    <span>{activeControlPanel.label}</span>
-                  </>
-                )}
-              </div>
-              <p className="mt-1 text-sm font-bold text-slate-600">
-                {view === "dashboard" && "Vista general de operación y seguimiento diario."}
-                {view === "history" && "Consulta consolidada del historial y exportaciones."}
-                {view === "reports" && activeControlPanel.description}
-              </p>
-            </div>
-
-            <div className="flex items-center gap-4">
-              {user && (
-                <div className="flex items-center gap-3 px-3 py-1.5 bg-slate-50 rounded-2xl border border-slate-100">
-                  <div className="w-6 h-6 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center text-[10px] font-black">
-                    {user.displayName?.charAt(0)}
-                  </div>
-                  <span className="text-xs font-bold text-slate-600 hidden sm:block">{user.displayName?.split(" ")[0]}</span>
-                </div>
-              )}
-              {!user && (
-                <button 
-                  onClick={handleLogin}
-                  className={cn(
-                    "inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-black uppercase tracking-widest text-slate-700 transition-all hover:border-slate-300 hover:text-slate-950",
-                    (view === "home" || view === "audit" || view === "setup") ? "flex" : "flex"
-                  )}
-                >
-                  <LogIn className="w-4 h-4" />
-                  Ingresar
-                </button>
-              )}
-            </div>
-          </div>
-        </header>
+        <div ref={contentContainerRef} className="flex-1 flex flex-col h-screen overflow-y-auto">
+        <Topbar
+          appTitle={appTitle}
+          view={view}
+          reportsLabel={activeControlPanel.label}
+          user={user}
+            authenticationEnabled={isFirebaseEnabled}
+          showMenuButton={(view === "dashboard" && isDashboardUnlocked) || view === "history" || view === "reports"}
+          showBackButton={view !== "dashboard"}
+          onOpenMenu={() => setIsMobileNavOpen(true)}
+          onBack={handleTopbarBack}
+          onLogin={handleLogin}
+        />
 
         <main className={cn(
           "p-4 md:p-8 transition-all duration-500",
           view === "dashboard" ? "max-w-7xl mx-auto w-full" : 
           view === "setup" ? "max-w-5xl mx-auto w-full pb-32" :
-          view === "audit" ? "max-w-6xl mx-auto w-full pb-32" :
+          view === "audit" ? "max-w-7xl mx-auto w-full pb-28 pt-2 md:pt-4" :
           view === "home" ? "max-w-md mx-auto w-full pb-32" :
           "max-w-md mx-auto w-full lg:max-w-4xl lg:mx-0"
         )}>
@@ -1344,320 +1149,32 @@ function AuditApp() {
               exit={{ opacity: 0, y: -20 }}
               className="space-y-8 pt-4"
             >
-              <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_380px]">
-                <div className="space-y-6">
-                  <div className="hero-shell rounded-[2.4rem] p-7 shadow-sm backdrop-blur space-y-6">
-                    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1.15fr)_300px] lg:items-center">
-                      <div className="space-y-5">
-                        <span className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 shadow-sm">
-                          <div className="h-2 w-2 rounded-full bg-emerald-500" />
-                          Inicio operativo
-                        </span>
-                        <div className="space-y-3">
-                          <h2 className="max-w-3xl text-3xl font-black leading-tight tracking-tight text-slate-950 md:text-[2.7rem]">Una entrada más clara, más usable y orientada a la acción.</h2>
-                          <p className="max-w-2xl text-sm font-medium leading-relaxed text-slate-600 md:text-base">El objetivo del inicio no es mostrar todo, sino ayudarte a arrancar rápido. Por eso la apertura prioriza contexto, acceso rápido y lectura operativa antes que el detalle fino.</p>
-                        </div>
-
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                          {[
-                            {
-                              label: "Operación",
-                              title: operatingStatus,
-                              detail: user ? "Sesión lista para trabajar." : "Ingresá para habilitar historial y sincronización.",
-                              icon: ShieldCheck,
-                              tone: "slate",
-                            },
-                            {
-                              label: "Mes actual",
-                              title: `${monthlyAudits.length} auditorías`,
-                              detail: `${recentAverageScore || 0}% de promedio mensual`,
-                              icon: CalendarIcon,
-                              tone: "blue",
-                            },
-                            {
-                              label: "Cobertura",
-                              title: `${activeLocations || LOCATIONS.length} sedes`,
-                              detail: "Actividad registrada en el historial.",
-                              icon: MapPin,
-                              tone: "amber",
-                            },
-                          ].map((item) => (
-                            <div key={item.label} className="rounded-[1.5rem] border border-white/80 bg-white/80 px-4 py-4 shadow-sm">
-                              <div className="flex items-center justify-between gap-3">
-                                <div>
-                                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">{item.label}</p>
-                                  <p className="mt-2 text-sm font-black text-slate-950">{item.title}</p>
-                                  <p className="mt-2 text-sm font-medium leading-relaxed text-slate-500">{item.detail}</p>
-                                </div>
-                                <div className={cn(
-                                  "flex h-10 w-10 items-center justify-center rounded-2xl",
-                                  item.tone === "slate" && "bg-slate-950 text-white",
-                                  item.tone === "blue" && "bg-blue-50 text-blue-600",
-                                  item.tone === "amber" && "bg-amber-50 text-amber-600"
-                                )}>
-                                  <item.icon className="h-4 w-4" />
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div className="flex flex-wrap gap-3">
-                          <button 
-                            onClick={startNewAudit}
-                            className="flex items-center gap-2 rounded-2xl bg-blue-600 px-5 py-3 text-sm font-black uppercase tracking-widest text-white shadow-lg shadow-blue-100 transition-all hover:bg-blue-700 active:scale-95"
-                          >
-                            <Plus className="w-4 h-4" />
-                            Nueva Auditoría
-                          </button>
-                          <button 
-                            onClick={() => setView("history")}
-                            className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-black uppercase tracking-widest text-slate-900 shadow-sm transition-all hover:border-slate-300 active:scale-95"
-                          >
-                            <History className="w-4 h-4" />
-                            Ver Historial
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="space-y-4">
-                        <div className="rounded-[2rem] border border-white/70 bg-white/70 p-3 shadow-inner">
-                          <img
-                            src="/hero-auditoria.svg"
-                            alt="Panel de auditoría y control operativo"
-                            className="w-full rounded-[1.5rem] border border-slate-200 bg-white"
-                          />
-                        </div>
-                        <div className="rounded-[1.8rem] bg-slate-950 px-5 py-5 text-white shadow-sm">
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Pulso general</p>
-                          <div className="mt-3 flex items-end justify-between gap-3">
-                            <div>
-                              <p className="text-3xl font-black">{bestAuditScore || averageScore}%</p>
-                              <p className="text-sm font-medium text-slate-300">mejor resultado histórico</p>
-                            </div>
-                            <div className="rounded-2xl bg-white/10 px-3 py-2 text-right">
-                              <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Promedio</p>
-                              <p className="mt-1 text-sm font-black">{averageScore}%</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-                    <div className="glass-panel rounded-[2rem] p-5 shadow-sm lg:col-span-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Accesos rápidos</p>
-                          <h3 className="mt-2 text-lg font-black text-slate-950">Módulos principales</h3>
-                        </div>
-                        <p className="text-xs font-bold text-slate-400">Abrí lo que necesitás sin pasar por menús extra.</p>
-                      </div>
-
-                      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                        {operationalModules.slice(0, 3).map((module) => (
-                          <button
-                            key={module.title}
-                            onClick={module.action}
-                            className="rounded-[1.6rem] border border-slate-200 bg-white px-4 py-4 text-left transition-all hover:border-slate-300 hover:bg-slate-50"
-                          >
-                            <div className={cn(
-                              "mb-4 flex h-11 w-11 items-center justify-center rounded-2xl",
-                              module.tone === "blue" && "bg-blue-50 text-blue-600",
-                              module.tone === "slate" && "bg-slate-900 text-white",
-                              module.tone === "emerald" && "bg-emerald-50 text-emerald-600"
-                            )}>
-                              <module.icon className="w-5 h-5" />
-                            </div>
-                            <p className="text-sm font-black text-slate-900">{module.title}</p>
-                            <p className="mt-2 text-sm font-medium leading-relaxed text-slate-500">{module.description}</p>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="glass-panel rounded-[2rem] p-5 shadow-sm space-y-4">
-                      <div>
-                        <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Estado del sistema</p>
-                        <h3 className="mt-2 text-lg font-black text-slate-950">Lectura rápida</h3>
-                      </div>
-                      <div className="space-y-3">
-                        <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cuenta</p>
-                          <p className="mt-2 text-sm font-black text-slate-900">{user ? "Sesión activa" : "Ingreso disponible"}</p>
-                          <p className="mt-2 text-sm font-medium text-slate-500">{user ? user.email : "Acceso desde el botón superior."}</p>
-                        </div>
-                        <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Estructura</p>
-                          <p className="mt-2 text-sm font-black text-slate-900">{configuredCategoryCount} categorías activas</p>
-                          <p className="mt-2 text-sm font-medium text-slate-500">General y perfiles por sucursal disponibles.</p>
-                        </div>
-                        <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Integración</p>
-                          <p className="mt-2 text-sm font-black text-slate-900">{isSheetSyncConfigured ? "Apps Script activo" : "Sincronización pendiente"}</p>
-                          <p className="mt-2 text-sm font-medium text-slate-500">Preparado para operación distribuida y espejo externo.</p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="glass-panel rounded-[2.25rem] p-6 shadow-sm backdrop-blur space-y-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Actividad reciente</p>
-                      <h3 className="text-lg font-black text-slate-900">Últimos movimientos</h3>
-                    </div>
-                    <button
-                      onClick={() => setView("history")}
-                      className="text-xs font-black uppercase tracking-widest text-blue-600"
-                    >
-                      Ver historial
-                    </button>
-                  </div>
-
-                  <div className="space-y-3">
-                    {recentAudits.length > 0 ? recentAudits.map((item) => (
-                      <button
-                        key={item.id}
-                        onClick={() => setSelectedAudit(item)}
-                        className="w-full rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4 text-left transition-all hover:border-slate-300"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-black text-slate-900">{item.staffName || item.location}</p>
-                            <p className="text-[11px] font-bold text-slate-500 mt-1">{item.role || item.items[0]?.category || "General"} · {item.date}</p>
-                          </div>
-                          <span className={cn(
-                            "px-3 py-1.5 rounded-full text-xs font-black",
-                            item.totalScore >= 90 ? "bg-emerald-50 text-emerald-700" :
-                            item.totalScore >= 70 ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-700"
-                          )}>
-                            {item.totalScore}%
-                          </span>
-                        </div>
-                      </button>
-                    )) : (
-                      <div className="rounded-[1.4rem] border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center">
-                        <p className="text-sm font-bold text-slate-500">Todavía no hay auditorías cargadas.</p>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="rounded-[1.6rem] border border-slate-200 bg-slate-50 px-4 py-4">
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Siguiente acción sugerida</p>
-                    <p className="mt-2 text-sm font-black text-slate-900">{history.length > 0 ? "Revisar indicadores y detectar desvíos." : "Crear la primera auditoría operativa."}</p>
-                    <p className="mt-2 text-sm font-medium text-slate-500">{history.length > 0 ? "Usá Control para mirar tendencia, estructura o integraciones según necesidad." : "El sistema ya está preparado para alta, ejecución y trazabilidad."}</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                {[
-                  { label: "Total Auditorías", value: history.length, icon: ClipboardList, color: "blue" },
-                  { label: "Promedio General", value: `${Math.round(history.reduce((acc, h) => acc + h.totalScore, 0) / (history.length || 1))}%`, icon: TrendingUp, color: "emerald" },
-                  { label: "Categorías", value: configuredCategoryCount, icon: Settings, color: "indigo" },
-                  { label: "Meta Operativa", value: "95%", icon: Target, color: "amber" },
-                ].map((stat, i) => (
-                  <div key={i} className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm flex items-center gap-4">
-                    <div className={cn(
-                      "w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg",
-                      stat.color === "blue" && "bg-blue-50 text-blue-600 shadow-blue-50",
-                      stat.color === "emerald" && "bg-emerald-50 text-emerald-600 shadow-emerald-50",
-                      stat.color === "indigo" && "bg-indigo-50 text-indigo-600 shadow-indigo-50",
-                      stat.color === "amber" && "bg-amber-50 text-amber-600 shadow-amber-50",
-                    )}>
-                      <stat.icon className="w-7 h-7" />
-                    </div>
-                    <div>
-                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{stat.label}</p>
-                      <p className="text-2xl font-black text-slate-900">{stat.value}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="lg:col-span-2 bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm space-y-6">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-xl font-black text-slate-900">Tendencia de Calidad</h3>
-                    <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                      <div className="w-2 h-2 bg-blue-600 rounded-full" />
-                      Puntaje %
-                    </div>
-                  </div>
-                  <div className="h-[300px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={chartData}>
-                        <defs>
-                          <linearGradient id="colorScore" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3}/>
-                            <stop offset="95%" stopColor="#3B82F6" stopOpacity={0}/>
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
-                        <XAxis 
-                          dataKey="name" 
-                          axisLine={false} 
-                          tickLine={false} 
-                          tick={{ fill: '#94A3B8', fontSize: 12, fontWeight: 600 }}
-                          dy={10}
-                        />
-                        <YAxis 
-                          axisLine={false} 
-                          tickLine={false} 
-                          tick={{ fill: '#94A3B8', fontSize: 12, fontWeight: 600 }}
-                          domain={[0, 100]}
-                        />
-                        <Tooltip 
-                          contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontWeight: 800 }}
-                        />
-                        <Area type="monotone" dataKey="score" stroke="#3B82F6" strokeWidth={4} fillOpacity={1} fill="url(#colorScore)" />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-                <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm space-y-6">
-                  <h3 className="text-xl font-black text-slate-900">Por Categoría</h3>
-                  <div className="h-[300px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={categoryData} layout="vertical">
-                        <XAxis type="number" hide />
-                        <YAxis 
-                          dataKey="name" 
-                          type="category" 
-                          axisLine={false} 
-                          tickLine={false} 
-                          tick={{ fill: '#1E293B', fontSize: 12, fontWeight: 800 }}
-                          width={80}
-                        />
-                        <Tooltip 
-                          cursor={{ fill: '#F8FAFC' }}
-                          contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', fontWeight: 800 }}
-                        />
-                        <Bar dataKey="value" radius={[0, 10, 10, 0]} barSize={30}>
-                          {categoryData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.color} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                  <div className="space-y-4">
-                    {categoryData.map((cat, i) => (
-                      <div key={i} className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <div className="w-3 h-3 rounded-full" style={{ backgroundColor: cat.color }} />
-                          <span className="text-sm font-bold text-slate-600">{cat.name}</span>
-                        </div>
-                        <span className="text-sm font-black text-slate-900">{cat.value}%</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
+              <DashboardView
+                userAuthenticated={Boolean(user)}
+                authenticationEnabled={isFirebaseEnabled}
+                isDashboardUnlocked={isDashboardUnlocked}
+                onUnlockDashboard={() => setIsDashboardUnlocked(true)}
+                onBackToCover={() => setIsDashboardUnlocked(false)}
+                onLogin={handleLogin}
+                onStartNewAudit={startNewAudit}
+                onOpenHistory={() => setView("history")}
+                onResumeDraft={resumeDraftAudit}
+                onRemoveDraft={removeDraftAudit}
+                sortedDraftAudits={sortedDraftAudits}
+                configuredCategoryCount={configuredCategoryCount}
+                sourceLabel={isUsingExternalHistory ? "Sheets" : user && isFirebaseEnabled ? "Firestore" : isSheetSyncConfigured ? "Apps Script" : "Local"}
+                dashboardDateLabel={dashboardDateLabel}
+                currentMonthDashboard={currentMonthDashboard}
+                currentMonthUniqueRoles={currentMonthUniqueRoles}
+                currentMonthUniqueStaff={currentMonthUniqueStaff}
+                monthlyCriticalAudits={monthlyCriticalAudits}
+                dashboardAlerts={dashboardAlerts}
+                recentMonthlyDashboardData={recentMonthlyDashboardData}
+                currentMonthRoleDistributionData={currentMonthRoleDistributionData}
+                currentMonthRoleData={currentMonthRoleData}
+                currentMonthStaffData={currentMonthStaffData}
+                rankingPanels={rankingPanels}
+              />
             </motion.div>
           )}
 
@@ -1729,11 +1246,11 @@ function AuditApp() {
                       <Clock className="w-5 h-5" />
                     </div>
                     <div>
-                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">CSV público</p>
-                      <p className="text-sm font-black text-slate-900">{isHistorySyncConfigured ? "Listo" : "Pendiente"}</p>
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Historial externo</p>
+                      <p className="text-sm font-black text-slate-900">{historySyncModeLabel}</p>
                     </div>
                   </div>
-                  <p className="text-sm text-slate-600">{isHistorySyncConfigured ? "El historial puede sincronizarse desde Google Sheets." : "Definí una URL CSV publicada para refrescar reportes."}</p>
+                  <p className="text-sm text-slate-600">{hasWebhookUrl ? "El historial puede importarse completo desde Apps Script y Google Sheets." : hasSheetCsvUrl ? "Hay una fuente CSV de respaldo configurada para validación externa." : "Definí un Apps Script o una URL CSV publicada para refrescar reportes."}</p>
                 </div>
                 <div className="rounded-[2rem] border border-white/70 bg-white/80 backdrop-blur p-5 shadow-sm">
                   <div className="flex items-center gap-3 mb-3">
@@ -1742,10 +1259,10 @@ function AuditApp() {
                     </div>
                     <div>
                       <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Acceso</p>
-                      <p className="text-sm font-black text-slate-900">{user ? "Autenticado" : "Invitado"}</p>
+                      <p className="text-sm font-black text-slate-900">{isFirebaseEnabled ? (user ? "Autenticado" : "Invitado") : "Sheets only"}</p>
                     </div>
                   </div>
-                  <p className="text-sm text-slate-600">{user ? "Hay acceso a historial y persistencia en Firestore." : "Sin iniciar sesión, la app no puede consultar el historial completo."}</p>
+                  <p className="text-sm text-slate-600">{isUsingExternalHistory ? "Se está usando historial importado desde Google Sheets." : user && isFirebaseEnabled ? "Hay acceso a historial y persistencia en Firestore." : localAuditHistory.length > 0 ? "Hay historial guardado en este dispositivo." : isFirebaseEnabled ? "Los datos nuevos se guardarán en este dispositivo hasta iniciar sesión." : "La operación está centrada en Apps Script, Google Sheets y almacenamiento local."}</p>
                 </div>
               </div>
 
@@ -1760,9 +1277,9 @@ function AuditApp() {
                   </button>
                 </div>
                 
-                {!user ? (
+                {!user && !isUsingExternalHistory && localAuditHistory.length === 0 ? (
                   <div className="bg-white rounded-2xl p-6 border border-dashed border-gray-300 text-center">
-                    <p className="text-gray-400 text-sm italic">Inicia sesión para ver tu historial.</p>
+                    <p className="text-gray-400 text-sm italic">Todavía no hay auditorías guardadas.</p>
                   </div>
                 ) : history.length === 0 ? (
                   <div className="bg-white rounded-2xl p-6 border border-dashed border-gray-300 text-center">
@@ -1802,232 +1319,96 @@ function AuditApp() {
               exit={{ opacity: 0, x: -20 }}
               className="space-y-6"
             >
-              <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.15fr)_360px]">
-                <div className="space-y-6">
-                  <div className="hero-shell rounded-[2.25rem] p-7 shadow-sm space-y-6">
+              <div className="mx-auto max-w-4xl">
+                <div className="panel-premium rounded-[2.3rem] p-5 md:p-7">
+                  <div className="flex items-center justify-between gap-3 pb-5">
+                    <h2 className="text-2xl font-black tracking-[-0.03em] text-slate-950 md:text-3xl">Configuración de auditoría</h2>
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">{session.date}</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
                     <div className="space-y-3">
-                      <span className="inline-flex items-center gap-2 rounded-full bg-white/80 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 shadow-sm">
-                        <div className="h-2 w-2 rounded-full bg-blue-600" />
-                        Alta guiada
-                      </span>
-                      <div>
-                        <h2 className="text-3xl font-black tracking-tight text-slate-950">Configuración de auditoría</h2>
-                        <p className="mt-2 text-sm font-medium leading-relaxed text-slate-500">Las plataformas de auditoría suelen trabajar este momento como un asistente: primero responsable, después sucursal y por último fecha operativa.</p>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                      {[
-                        { step: 1, title: "Auditor", detail: "Quién ejecuta la revisión." },
-                        { step: 2, title: "Sucursal", detail: "Dónde corre la auditoría." },
-                        { step: 3, title: "Fecha", detail: "Cuándo se registra el operativo." },
-                      ].map((item) => {
-                        const isActive = setupStep === item.step;
-                        const isDone = setupStep > item.step || (item.step === 1 && session.auditorId) || (item.step === 2 && session.location) || (item.step === 3 && session.date);
-
-                        return (
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Auditor</p>
+                      <div className="grid grid-cols-1 gap-3">
+                        {AUDITORS.map((auditor) => (
                           <button
-                            key={item.step}
-                            onClick={() => setSetupStep(item.step as 1 | 2 | 3)}
+                            key={auditor.id}
+                            onClick={() => setSession({ ...session, auditorId: auditor.id })}
                             className={cn(
-                              "rounded-[1.6rem] border px-4 py-4 text-left transition-all",
-                              isActive ? "border-slate-950 bg-slate-950 text-white" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                              "flex items-center justify-between rounded-[1.5rem] border px-4 py-4 text-left transition-all",
+                              session.auditorId === auditor.id
+                                ? "border-slate-950 bg-slate-950 text-white"
+                                : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
                             )}
                           >
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <p className={cn("text-[10px] font-black uppercase tracking-[0.18em]", isActive ? "text-slate-300" : "text-slate-400")}>Paso {item.step}</p>
-                                <p className="mt-2 text-sm font-black">{item.title}</p>
-                                <p className={cn("mt-2 text-sm font-medium", isActive ? "text-slate-300" : "text-slate-500")}>{item.detail}</p>
-                              </div>
+                            <div className="flex items-center gap-3">
                               <div className={cn(
-                                "flex h-9 w-9 items-center justify-center rounded-2xl text-xs font-black",
-                                isActive ? "bg-white/10 text-white" : isDone ? "bg-emerald-50 text-emerald-600" : "bg-slate-100 text-slate-500"
+                                "flex h-10 w-10 items-center justify-center rounded-xl",
+                                session.auditorId === auditor.id ? "bg-white/10 text-white" : "bg-slate-100 text-slate-600"
                               )}>
-                                {isDone ? <Check className="h-4 w-4" /> : `0${item.step}`}
+                                <User className="w-4.5 h-4.5" />
                               </div>
+                              <p className="text-sm font-black">{auditor.name}</p>
                             </div>
+                            {session.auditorId === auditor.id && <Check className="w-5 h-5" />}
                           </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div className="glass-panel rounded-[2.25rem] p-6 shadow-sm space-y-5">
-                    {setupStep === 1 && (
-                      <div className="space-y-4">
-                        <div>
-                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Paso 1</p>
-                          <h3 className="mt-2 text-xl font-black text-slate-950">Seleccionar auditor</h3>
-                          <p className="mt-2 text-sm font-medium text-slate-500">Definí el responsable operativo que va a ejecutar la auditoría.</p>
-                        </div>
-
-                        <div className="grid grid-cols-1 gap-3">
-                          {AUDITORS.map((auditor) => (
-                            <button
-                              key={auditor.id}
-                              onClick={() => setSession({ ...session, auditorId: auditor.id })}
-                              className={cn(
-                                "flex items-center justify-between rounded-[1.6rem] border p-5 text-left transition-all",
-                                session.auditorId === auditor.id
-                                  ? "border-slate-950 bg-slate-950 text-white"
-                                  : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
-                              )}
-                            >
-                              <div className="flex items-center gap-3">
-                                <div className={cn(
-                                  "flex h-11 w-11 items-center justify-center rounded-2xl",
-                                  session.auditorId === auditor.id ? "bg-white/10 text-white" : "bg-slate-100 text-slate-600"
-                                )}>
-                                  <User className="w-5 h-5" />
-                                </div>
-                                <div>
-                                  <p className="text-sm font-black">{auditor.name}</p>
-                                  <p className={cn("mt-1 text-xs font-bold", session.auditorId === auditor.id ? "text-slate-300" : "text-slate-500")}>Responsable que firma y ejecuta el relevamiento.</p>
-                                </div>
-                              </div>
-                              {session.auditorId === auditor.id && <Check className="w-5 h-5" />}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {setupStep === 2 && (
-                      <div className="space-y-4">
-                        <div>
-                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Paso 2</p>
-                          <h3 className="mt-2 text-xl font-black text-slate-950">Elegir ubicación</h3>
-                          <p className="mt-2 text-sm font-medium text-slate-500">La sucursal define qué estructura se usa y a qué operación se asocia el control.</p>
-                        </div>
-
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                          {LOCATIONS.map((loc) => (
-                            <button
-                              key={loc}
-                              onClick={() => setSession({ ...session, location: loc as Location })}
-                              className={cn(
-                                "rounded-[1.6rem] border p-5 text-left transition-all",
-                                session.location === loc
-                                  ? "border-slate-950 bg-slate-950 text-white"
-                                  : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
-                              )}
-                            >
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="flex items-center gap-3">
-                                  <div className={cn(
-                                    "flex h-11 w-11 items-center justify-center rounded-2xl",
-                                    session.location === loc ? "bg-white/10 text-white" : "bg-slate-100 text-slate-600"
-                                  )}>
-                                    <MapPin className="w-5 h-5" />
-                                  </div>
-                                  <div>
-                                    <p className="text-sm font-black">{loc}</p>
-                                    <p className={cn("mt-1 text-xs font-bold", session.location === loc ? "text-slate-300" : "text-slate-500")}>Perfil operativo y estructura aplicable.</p>
-                                  </div>
-                                </div>
-                                {session.location === loc && <Check className="w-5 h-5" />}
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    {setupStep === 3 && (
-                      <div className="space-y-4">
-                        <div>
-                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Paso 3</p>
-                          <h3 className="mt-2 text-xl font-black text-slate-950">Confirmar fecha operativa</h3>
-                          <p className="mt-2 text-sm font-medium text-slate-500">Definí la fecha que quedará como referencia del registro y del historial consolidado.</p>
-                        </div>
-
-                        <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 space-y-4">
-                          <label className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Fecha</label>
-                          <div className="relative">
-                            <CalendarIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                            <input 
-                              type="date" 
-                              value={session.date}
-                              onChange={(e) => setSession({ ...session, date: e.target.value })}
-                              className="w-full rounded-2xl border border-gray-200 bg-slate-50 py-4 pl-12 pr-4 font-semibold focus:outline-none"
-                            />
-                          </div>
-                          <div className="rounded-[1.4rem] bg-slate-50 px-4 py-4 border border-slate-200">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Listo para continuar</p>
-                            <p className="mt-2 text-sm font-medium text-slate-600">Con esta confirmación el sistema te deriva a la selección del puesto o categoría a auditar.</p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="flex flex-col gap-3 border-t border-slate-200 pt-5 sm:flex-row sm:items-center sm:justify-between">
-                      <button
-                        onClick={() => {
-                          if (setupStep === 1) {
-                            setView("dashboard");
-                            return;
-                          }
-                          setSetupStep((current) => (current - 1) as 1 | 2 | 3);
-                        }}
-                        className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-black uppercase tracking-widest text-slate-700 hover:border-slate-300 transition-all"
-                      >
-                        <ArrowLeft className="w-4 h-4" />
-                        {setupStep === 1 ? "Cancelar" : "Volver"}
-                      </button>
-
-                      <button 
-                        onClick={handleSetupSubmit}
-                        disabled={(setupStep === 1 && !session.auditorId) || (setupStep === 2 && !session.location) || (setupStep === 3 && !session.date)}
-                        className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 py-3 text-xs font-black uppercase tracking-widest text-white transition-all disabled:cursor-not-allowed disabled:opacity-50 hover:bg-slate-800"
-                      >
-                        {setupStep === 3 ? "Ir a la auditoría" : "Continuar"}
-                        <ChevronRight className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-4 xl:sticky xl:top-28 h-fit">
-                  <div className="glass-panel rounded-[2.25rem] p-6 shadow-sm space-y-5">
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Estado del alta</p>
-                      <h3 className="mt-2 text-xl font-black text-slate-950">Resumen operativo</h3>
-                    </div>
-
-                    <div className="rounded-[1.6rem] bg-slate-950 px-5 py-5 text-white">
-                      <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Progreso</p>
-                      <div className="mt-3 flex items-end justify-between gap-3">
-                        <div>
-                          <p className="text-3xl font-black">{setupCompletionCount}/3</p>
-                          <p className="text-sm font-medium text-slate-300">datos principales definidos</p>
-                        </div>
-                        <div className="rounded-2xl bg-white/10 px-3 py-2 text-right">
-                          <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Paso actual</p>
-                          <p className="mt-1 text-sm font-black">0{setupStep}</p>
-                        </div>
+                        ))}
                       </div>
                     </div>
 
                     <div className="space-y-3">
-                      <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Auditor</p>
-                        <p className="mt-2 text-sm font-black text-slate-900">{selectedAuditorOption?.name ?? "Sin seleccionar"}</p>
-                      </div>
-                      <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sucursal</p>
-                        <p className="mt-2 text-sm font-black text-slate-900">{session.location ?? "Sin seleccionar"}</p>
-                      </div>
-                      <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Fecha</p>
-                        <p className="mt-2 text-sm font-black text-slate-900">{session.date || "Sin definir"}</p>
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Sucursal</p>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
+                        {LOCATIONS.map((loc) => (
+                          <button
+                            key={loc}
+                            onClick={() => setSession({ ...session, location: loc as Location })}
+                            className={cn(
+                              "flex items-center justify-between rounded-[1.5rem] border px-4 py-4 text-left transition-all",
+                              session.location === loc
+                                ? "border-slate-950 bg-slate-950 text-white"
+                                : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
+                            )}
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className={cn(
+                                "flex h-10 w-10 items-center justify-center rounded-xl",
+                                session.location === loc ? "bg-white/10 text-white" : "bg-slate-100 text-slate-600"
+                              )}>
+                                <MapPin className="w-4.5 h-4.5" />
+                              </div>
+                              <p className="text-sm font-black">{loc}</p>
+                            </div>
+                            {session.location === loc && <Check className="w-5 h-5" />}
+                          </button>
+                        ))}
                       </div>
                     </div>
                   </div>
 
-                  <div className="rounded-[2.25rem] border border-slate-200 bg-white p-6 shadow-sm space-y-3">
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Criterio profesional</p>
-                    <p className="text-sm font-medium leading-relaxed text-slate-600">Separar el alta en pasos reduce errores, mejora la legibilidad en celular y deja más claro qué falta antes de empezar a auditar.</p>
+                  <div className="mt-6 flex flex-col gap-3 border-t border-slate-200 pt-5 sm:flex-row sm:items-center sm:justify-between">
+                    {session.location && (
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-left sm:max-w-[60%]">
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Nombre de auditoría</p>
+                        <p className="mt-1 text-sm font-black text-slate-900">{auditBatchDisplayName}</p>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => setView("dashboard")}
+                      className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-black uppercase tracking-widest text-slate-700 transition-all hover:border-slate-300"
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                      Cancelar
+                    </button>
+
+                    <button 
+                      onClick={handleSetupSubmit}
+                      disabled={!session.auditorId || !session.location}
+                      className="inline-flex items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 py-3 text-xs font-black uppercase tracking-widest text-white transition-all hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Continuar
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -2049,11 +1430,13 @@ function AuditApp() {
                       <div className="space-y-4">
                         <span className="inline-flex items-center gap-2 rounded-full bg-white/85 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 shadow-sm">
                           <div className="h-2 w-2 rounded-full bg-blue-600" />
-                          Selección de categoría
+                          Categorías
                         </span>
                         <div className="space-y-2">
-                          <h2 className="text-2xl font-black tracking-tight text-slate-950 lg:text-3xl">Elegí qué área vas a auditar.</h2>
-                          <p className="text-sm font-medium leading-relaxed text-slate-500">En celular conviene un flujo corto y táctil. En computadora tiene sentido mostrar más contexto para decidir rápido sin entrar y salir.</p>
+                          <h2 className="text-2xl font-black tracking-tight text-slate-950 lg:text-3xl">Elegí el área.</h2>
+                          {auditBatchDisplayName && (
+                            <p className="text-sm font-bold text-slate-600">{auditBatchDisplayName}</p>
+                          )}
                         </div>
                         <div className="hidden lg:grid lg:grid-cols-3 lg:gap-3">
                           <div className="rounded-[1.4rem] border border-white/80 bg-white/80 px-4 py-4 shadow-sm">
@@ -2070,52 +1453,101 @@ function AuditApp() {
                           </div>
                         </div>
                       </div>
-
-                      <div className="hidden lg:block">
-                        <div className="rounded-[1.8rem] bg-slate-950 px-5 py-5 text-white shadow-sm">
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sugerencia</p>
-                          <p className="mt-3 text-lg font-black">Empezá por la categoría más crítica del día.</p>
-                          <p className="mt-2 text-sm font-medium leading-relaxed text-slate-300">Después vas a poder volver a esta selección sin perder la configuración inicial del operativo.</p>
-                        </div>
-                      </div>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-5">
-                    {auditCategories.map((category) => (
+                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-5 lg:gap-2.5 xl:grid-cols-6 xl:gap-3">
+                    {auditCategories.map((category) => {
+                      const completedCategoryReport = completedAuditReports.find((report) => report.role === category.name);
+                      const isOrdersCategory = category.name === "Ordenes";
+                      const categoryProgress = isOrdersCategory
+                        ? sampledOrdersProgress
+                        : completedCategoryReport?.session.totalScore;
+                      const isCategoryTracked = typeof categoryProgress === "number";
+
+                      return (
                       <button
                         key={category.id}
                         onClick={() => setSelectedRole(category.name)}
-                        className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-col items-center justify-center gap-3 group hover:border-blue-200 hover:shadow-md transition-all active:scale-95 lg:items-start lg:text-left lg:min-h-[180px]"
+                        className={cn(
+                          "px-4 py-4 rounded-[1.7rem] border shadow-sm flex flex-col items-center justify-center gap-2.5 group transition-all active:scale-95 lg:items-start lg:text-left lg:min-h-[132px]",
+                          isCategoryTracked
+                            ? "border-emerald-200 bg-emerald-50/90 hover:border-emerald-300"
+                            : "border-gray-100 bg-white hover:border-blue-200 hover:shadow-md"
+                        )}
                       >
-                        <div className="w-12 h-12 bg-gray-50 rounded-2xl flex items-center justify-center group-hover:bg-blue-50 transition-colors">
-                          {category.name.includes("Asesor") && <UserCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {category.name.includes("Técnico") && <Wrench className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {category.name.includes("Jefe") && <ShieldCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {category.name.includes("Lavadero") && <Droplets className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {category.name.includes("Garantía") && <FileCheck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {category.name.includes("Repuestos") && <Package className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {category.name.includes("Pre Entrega") && <Truck className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
-                          {category.name.includes("Ordenes") && <FileText className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />}
+                        <div className="w-10 h-10 bg-gray-50 rounded-[1rem] flex items-center justify-center group-hover:bg-blue-50 transition-colors">
+                          {category.name.includes("Asesor") && <UserCheck className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Técnico") && <Wrench className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Jefe") && <ShieldCheck className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Lavadero") && <Droplets className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Garantía") && <FileCheck className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Repuestos") && <Package className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Pre Entrega") && <Truck className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />}
+                          {category.name.includes("Ordenes") && <FileText className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />}
                           {!["Asesor", "Técnico", "Jefe", "Lavadero", "Garantía", "Repuestos", "Pre Entrega", "Ordenes"].some(k => category.name.includes(k)) && (
-                            <ClipboardList className="w-6 h-6 text-gray-400 group-hover:text-blue-500" />
+                            <ClipboardList className="w-5 h-5 text-gray-400 group-hover:text-blue-500" />
                           )}
                         </div>
-                        <span className="font-bold text-gray-800 text-xs text-center leading-tight lg:text-sm lg:text-left">{category.name}</span>
-                        <span className="hidden lg:block text-xs font-medium text-slate-500 leading-relaxed">{category.items.length} puntos de control disponibles para esta categoría.</span>
+                        <div className="space-y-1">
+                          <span className={cn("font-bold text-[11px] text-center leading-tight lg:text-sm lg:text-left", isCategoryTracked ? "text-emerald-950" : "text-gray-800")}>{category.name}</span>
+                          {isCategoryTracked && (
+                            <p className="text-[10px] font-black uppercase tracking-[0.14em] text-emerald-700">{categoryProgress}%</p>
+                          )}
+                        </div>
                       </button>
-                    ))}
+                      );
+                    })}
                   </div>
+
+                  {completedAuditReports.length > 0 && (
+                    <div className="flex justify-end">
+                      <Button variant="secondary" size="lg" onClick={() => setShowBatchReportModal(true)} className="border-slate-200 bg-white text-slate-900 hover:bg-slate-50">
+                        <FileText className="h-4 w-4" />
+                        Generar reporte
+                      </Button>
+                    </div>
+                  )}
                 </div>
               ) : (
-                <div className="grid grid-cols-1 gap-6 lg:grid-cols-[320px_minmax(0,1fr)] xl:grid-cols-[360px_minmax(0,1fr)]">
-                  <div className="space-y-4 lg:sticky lg:top-28 h-fit">
+                <>
+                <div className="lg:hidden rounded-[1.6rem] border border-slate-200 bg-[linear-gradient(135deg,#081222_0%,#12345d_100%)] p-3.5 text-white shadow-[0_14px_34px_rgba(12,35,64,0.18)]">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Auditoría en campo</p>
+                      <h2 className="mt-1.5 text-lg font-black tracking-[-0.03em] text-white">{selectedRole}</h2>
+                      <p className="mt-1.5 text-sm font-medium text-slate-300">
+                        {isOrdersAudit
+                          ? `OR ${session.orderNumber || "sin número"} · ${sessionParticipants.asesorServicio || "Sin asesor"}`
+                          : (selectedStaff || "Sin personal asignado")}
+                      </p>
+                      {isOrdersAudit && (
+                        <p className="mt-2 text-xs font-medium leading-relaxed text-slate-300">
+                          Técnico: {sessionParticipants.tecnico || "-"} · Controller: {sessionParticipants.controller || "-"} · Lavador: {sessionParticipants.lavador || "-"}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => setSelectedRole(null)}
+                      className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-white/10 bg-white/10 text-white"
+                    >
+                      <ArrowLeft className="h-5 w-5" />
+                    </button>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-slate-200">{sessionItems.length}/{selectedAuditItems.length} respondidos</span>
+                    <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">OR {currentOrCompliance.compliance}%</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-5 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)]">
+                  <div className="space-y-3 lg:sticky lg:top-24 h-fit">
                     <div className={cn(
-                      "pt-3 pb-2 px-4 space-y-3 rounded-[2rem] shadow-sm",
+                      "hidden space-y-3 rounded-[1.5rem] lg:block",
                       selectedRole === "Ordenes" ? "bg-[#EEF3F9]/95 backdrop-blur-xl" : "bg-[#F9F9F9] border border-slate-200"
                     )}>
                       <div className={cn(
-                        "flex items-center justify-between rounded-[1.6rem] border px-4 py-3 shadow-sm",
+                        "flex items-center justify-between rounded-[1.4rem] border px-3 py-3 shadow-sm",
                         selectedRole === "Ordenes"
                           ? "bg-gradient-to-br from-slate-950 via-[#0c2340] to-[#1d4f91] border-slate-800 text-white shadow-[0_20px_60px_rgba(12,35,64,0.35)]"
                           : "bg-white border-gray-100 text-gray-900"
@@ -2133,13 +1565,18 @@ function AuditApp() {
                             <ArrowLeft className="w-5 h-5" />
                           </button>
                           <div>
-                            <h2 className="text-lg font-bold leading-tight">{selectedRole}</h2>
+                            <h2 className="text-base font-bold leading-tight">{selectedRole}</h2>
                             <p className={cn(
                               "text-[10px] uppercase font-black tracking-widest",
                               selectedRole === "Ordenes" ? "text-blue-100/80" : "text-gray-400"
                             )}>
-                              {selectedRole === "Ordenes" ? "Control documental VW" : "Auditoría en curso"}
+                              {selectedRole === "Ordenes" ? `OR ${session.orderNumber || "sin número"}` : (auditBatchDisplayName || "Auditoría en curso")}
                             </p>
+                            {selectedRole === "Ordenes" && (
+                              <p className="mt-1.5 max-w-[180px] text-[11px] font-medium leading-relaxed text-slate-300">
+                                Asesor {sessionParticipants.asesorServicio || "-"} · Técnico {sessionParticipants.tecnico || "-"}
+                              </p>
+                            )}
                           </div>
                         </div>
                         <div className="text-right">
@@ -2147,23 +1584,20 @@ function AuditApp() {
                             "text-xl font-black leading-none",
                             selectedRole === "Ordenes" ? "text-white" : "text-gray-900"
                           )}>
-                            {selectedAuditItems.length > 0 ? Math.round((sessionItems.length / selectedAuditItems.length) * 100) : 0}%
+                            {currentOrCompliance.compliance}%
                           </div>
                           <div className={cn(
                             "text-[10px] font-bold uppercase tracking-tighter",
                             selectedRole === "Ordenes" ? "text-blue-100/80" : "text-gray-400"
-                          )}>Progreso</div>
+                          )}>{selectedRole === "Ordenes" ? "Cumplimiento OR" : "Progreso"}</div>
                           <div className={cn(
                             "text-[10px] font-black uppercase tracking-tighter mt-1",
                             selectedRole === "Ordenes" ? "text-cyan-300" : "text-emerald-600"
-                          )}>Score {calculateCurrentScore()}%</div>
+                          )}>Score {currentOrCompliance.compliance}%</div>
                         </div>
                       </div>
 
-                      <div className={cn(
-                        "space-y-2 rounded-[1.4rem] border p-3 shadow-sm",
-                        selectedRole === "Ordenes" ? "bg-white border-slate-200" : "bg-white border-slate-200"
-                      )}>
+                      <div className="space-y-2 rounded-[1.2rem] border border-slate-200 bg-white p-3 shadow-sm">
                       <div className="h-2 w-full bg-gray-200 rounded-full overflow-hidden">
                         <motion.div 
                           initial={{ width: 0 }}
@@ -2193,44 +1627,34 @@ function AuditApp() {
                           {sessionItems.length} de {selectedAuditItems.length}
                         </span>
                       </div>
-                      {selectedRole === "Ordenes" && (
-                        <div className="grid grid-cols-2 gap-2 pt-1 sm:grid-cols-4">
-                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Ritmo</p>
-                            <p className="text-base font-black text-slate-900">{sessionItems.length}</p>
-                            <p className="text-[11px] text-slate-500">cargados</p>
-                          </div>
-                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Estado</p>
-                            <p className="text-base font-black text-slate-900">{sessionItems.filter(i => i.status === 'pass').length}</p>
-                            <p className="text-[11px] text-slate-500">cumplen</p>
-                          </div>
-                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Desvíos</p>
-                            <p className="text-base font-black text-slate-900">{sessionItems.filter(i => i.status === 'fail').length}</p>
-                            <p className="text-[11px] text-slate-500">revisar</p>
-                          </div>
-                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2.5">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Siguiente</p>
-                            <p className="text-base font-black text-slate-900">
-                              {nextPendingItemIndex >= 0 ? String(nextPendingItemIndex + 1).padStart(2, "0") : "OK"}
-                            </p>
-                            <p className="text-[11px] text-slate-500">pendiente</p>
-                          </div>
+                      </div>
+
+                      {isOrdersAudit && (
+                        <div className="grid grid-cols-1 gap-2">
+                          {(["asesor", "tecnico", "controller", "lavador", "repuestos"] as OrResponsibleRole[]).map((role) => {
+                            const roleScore = currentOrRoleScores.find((item) => item.role === role);
+                            return (
+                              <div key={role} className="rounded-[1rem] border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
+                                <div className="flex items-center justify-between gap-3">
+                                  <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">{OR_ROLE_LABELS[role]}</p>
+                                  <p className="text-sm font-black text-slate-950">{roleScore?.compliance ?? 0}%</p>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
-                    </div>
 
                   </div>
 
-                    {selectedAuditStaffOptions.length > 0 && (
-                      <div className="space-y-2 rounded-[1.6rem] border border-slate-200 bg-white p-4 shadow-sm">
+                    {!isOrdersAudit && selectedAuditStaffOptions.length > 0 && (
+                      <div className="space-y-2 rounded-[1.3rem] border border-slate-200 bg-white p-3.5 shadow-sm">
                         <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Personal Auditado</label>
                         <div className="relative">
                           <select 
                             value={selectedStaff}
                             onChange={(e) => setSelectedStaff(e.target.value)}
-                            className="w-full p-4 bg-slate-50 border border-gray-200 rounded-2xl font-bold text-sm appearance-none focus:outline-none shadow-sm"
+                            className="w-full p-3.5 bg-slate-50 border border-gray-200 rounded-2xl font-bold text-sm appearance-none focus:outline-none shadow-sm"
                           >
                             <option value="">Seleccionar nombre...</option>
                             {selectedAuditStaffOptions.map(name => (
@@ -2242,96 +1666,230 @@ function AuditApp() {
                       </div>
                     )}
 
-                    {selectedRole === "Ordenes" && selectedStaff && (
-                      <div className="rounded-[1.6rem] border border-slate-200 bg-white px-4 py-4 shadow-sm space-y-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-[#1d4f91]">Meta por asesor</p>
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <h3 className="text-sm font-black text-slate-900">{selectedStaff}</h3>
-                              <span className="text-[11px] font-bold text-slate-500">{auditedOrdersForSelectedStaff} / {ordersTargetPerAdvisor}</span>
-                              <span className={cn(
-                                "text-[11px] font-black uppercase tracking-wide",
-                                auditedOrdersRemaining === 0 ? "text-emerald-700" : "text-amber-600"
-                              )}>
-                                {auditedOrdersRemaining === 0 ? "Meta alcanzada" : `Faltan ${auditedOrdersRemaining}`}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="rounded-xl bg-slate-950 px-3 py-2 border border-slate-900 text-center min-w-[68px]">
-                            <div className="text-lg font-black text-white leading-none">{auditedOrdersForSelectedStaff}</div>
-                          </div>
-                        </div>
-                        <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
-                          <motion.div
-                            initial={{ width: 0 }}
-                            animate={{ width: `${auditedOrdersProgress}%` }}
-                            className="h-full bg-gradient-to-r from-[#0c2340] via-[#1d4f91] to-[#00a3e0] rounded-full"
+                    {isOrdersAudit && (
+                      <div className="rounded-[1.3rem] border border-slate-200 bg-white px-3.5 py-3.5 shadow-sm space-y-3">
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Número de OR</label>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            maxLength={6}
+                            value={session.orderNumber || ""}
+                            onChange={(e) => setSession({ ...session, orderNumber: e.target.value.replace(/\D/g, "").slice(0, 6) })}
+                            placeholder="Ej. 154238"
+                            className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3.5 font-bold text-sm focus:outline-none shadow-sm"
                           />
+                        </div>
+                        <p className="text-[10px] font-black uppercase tracking-[0.2em] text-[#1d4f91]">Participantes de la OR</p>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
+                          {([
+                            ["asesorServicio", "Asesor de servicio", OR_PARTICIPANTS.asesorServicio, true],
+                            ["tecnico", "Técnico", OR_PARTICIPANTS.tecnico, false],
+                            ["controller", "Controller", OR_PARTICIPANTS.controller, false],
+                            ["lavador", "Lavador", OR_PARTICIPANTS.lavador, false],
+                            ["repuestos", "Repuestos", OR_PARTICIPANTS.repuestos, false],
+                          ] as const).map(([participantKey, label, options, required]) => (
+                            <div key={participantKey} className="space-y-2">
+                              <label className="px-1 text-[10px] font-black uppercase tracking-widest text-gray-400">{label}</label>
+                              <div className="relative">
+                                <select
+                                  value={(sessionParticipants[participantKey] ?? "") as string}
+                                  onChange={(e) => setSession({
+                                    ...session,
+                                    participants: {
+                                      ...sessionParticipants,
+                                      [participantKey]: e.target.value,
+                                    },
+                                  })}
+                                  className="w-full appearance-none rounded-2xl border border-gray-200 bg-slate-50 p-3.5 text-sm font-bold shadow-sm focus:outline-none"
+                                >
+                                  <option value="">{required ? `Seleccionar ${label.toLowerCase()}...` : `Sin ${label.toLowerCase()}...`}</option>
+                                  {options.map((name) => (
+                                    <option key={name} value={name}>{name}</option>
+                                  ))}
+                                </select>
+                                <ChevronDown className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     )}
-
-                    <div className="hidden lg:block rounded-[1.6rem] border border-slate-200 bg-white px-4 py-4 shadow-sm">
-                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Modo escritorio</p>
-                      <p className="mt-2 text-sm font-black text-slate-900">Más contexto, menos salto visual</p>
-                      <p className="mt-2 text-sm font-medium leading-relaxed text-slate-500">En computadora dejamos el contexto fijo a la izquierda y el trabajo principal a la derecha. En móvil el flujo sigue siendo vertical y directo.</p>
-                    </div>
                   </div>
 
-                  <div className="space-y-4 pb-12 min-w-0">
-                    {selectedAuditItems.map((auditItem, idx: number) => (
-                      <AuditItemRow 
-                        key={auditItem.id}
-                        question={auditItem.text}
-                        index={idx}
-                        item={session.items?.find(i => i.question === auditItem.text)}
-                        required={auditItem.required}
-                        showStructuredQuestion={selectedRole === "Ordenes"}
-                        onStatusToggle={(status) => toggleItemStatus(auditItem.text, status)}
-                        onCommentUpdate={(comment) => updateItemComment(auditItem.text, comment)}
-                      />
-                    ))}
-                    
-                    <div className="space-y-2 mt-8">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Observaciones Generales</label>
-                      <textarea 
-                        placeholder="Escribe aquí cualquier nota adicional sobre esta auditoría..."
-                        value={session.notes || ""}
-                        onChange={(e) => setSession({ ...session, notes: e.target.value })}
-                        className={cn(
-                          "w-full p-6 border rounded-3xl font-medium text-sm focus:outline-none shadow-sm min-h-[120px]",
-                          selectedRole === "Ordenes"
-                            ? "bg-white border-slate-200 text-slate-700"
-                            : "bg-white border-gray-200"
-                        )}
-                      />
+                    <div className="space-y-4 pb-40 lg:pb-12 min-w-0">
+                      <div className="rounded-[1.6rem] border border-slate-200 bg-white p-4 shadow-sm lg:p-4">
+                      <div className="mb-4 grid grid-cols-3 gap-2 lg:hidden">
+                        <div className="rounded-[1.2rem] border border-slate-200 bg-slate-50 px-3 py-3">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Total</p>
+                          <p className="mt-2 text-base font-black text-slate-900">{selectedAuditItems.length}</p>
+                        </div>
+                        <div className="rounded-[1.2rem] border border-slate-200 bg-slate-50 px-3 py-3">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">OR</p>
+                          <p className="mt-2 text-base font-black text-slate-900">{currentOrCompliance.compliance}%</p>
+                        </div>
+                        <div className="rounded-[1.2rem] border border-slate-200 bg-slate-50 px-3 py-3">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Roles</p>
+                          <p className="mt-2 text-base font-black text-slate-900">{isOrdersAudit ? currentOrRoleScores.length : 1}</p>
+                        </div>
+                      </div>
+
+                      <div className="hidden lg:flex items-center justify-between gap-3 border-b border-slate-100 pb-3 mb-3">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Checklist</p>
+                          <h3 className="mt-1 text-base font-black text-slate-950">{isOrdersAudit ? "OR Postventa" : "Controles"}</h3>
+                        </div>
+                        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-400">{selectedAuditItems.length} puntos</p>
+                      </div>
+
+                      <div className="space-y-4">
+                        {selectedAuditItems.map((auditItem) => (
+                          <AuditItemRow 
+                            key={auditItem.id}
+                            rowId={`audit-item-${auditItem.id}`}
+                            question={auditItem.text}
+                            index={selectedAuditItems.findIndex((item) => item.id === auditItem.id)}
+                            item={session.items?.find(i => i.question === auditItem.text)}
+                            required={false}
+                            block={auditItem.block}
+                            description={auditItem.description}
+                            responsibleRoles={auditItem.responsibleRoles}
+                            allowsNa={auditItem.allowsNa}
+                            priority={auditItem.priority}
+                            guidance={auditItem.guidance}
+                            requiresCommentOnFail={auditItem.requiresCommentOnFail}
+                            emphasized={focusedAuditItemId === auditItem.id}
+                            showStructuredQuestion={isOrdersAudit}
+                            onStatusToggle={(status) => toggleItemStatus(auditItem.text, status)}
+                            onCommentUpdate={(comment) => updateItemComment(auditItem.text, comment)}
+                            onPhotoUpdate={(photoUrl) => updateItemPhoto(auditItem.text, photoUrl)}
+                          />
+                        ))}
+                      </div>
                     </div>
 
+                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
+                      <div className="space-y-2">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Observaciones</label>
+                        <textarea 
+                          placeholder="Observaciones"
+                          value={session.notes || ""}
+                          onChange={(e) => setSession({ ...session, notes: e.target.value })}
+                          className={cn(
+                            "w-full p-6 border rounded-3xl font-medium text-sm focus:outline-none shadow-sm min-h-[160px]",
+                            selectedRole === "Ordenes"
+                              ? "bg-white border-slate-200 text-slate-700"
+                              : "bg-white border-gray-200"
+                          )}
+                        />
+
+                        <div className="rounded-[1.8rem] border border-slate-200 bg-white p-4 shadow-sm space-y-4 lg:hidden">
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cierre</p>
+                            <p className="mt-2 text-sm font-black text-slate-900">Enviar</p>
+                            {failItemsWithoutCommentCount > 0 && (
+                              <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Faltan {failItemsWithoutCommentCount} observaciones obligatorias en desvíos.</p>
+                            )}
+                          </div>
+
+                          <button
+                            onClick={handleAuditSubmit}
+                            disabled={sessionItems.length === 0 || isSendingToSheet || failItemsWithoutCommentCount > 0}
+                            className={cn(
+                              "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                              sessionItems.length > 0 && !isSendingToSheet && failItemsWithoutCommentCount === 0
+                                ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]"
+                                : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                            )}
+                          >
+                            {isSendingToSheet ? (
+                              <>
+                                <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                Enviando al Sheet...
+                              </>
+                            ) : (
+                              <>
+                                <Save className="w-4 h-4" />
+                                Enviar
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="hidden rounded-[1.8rem] border border-slate-200 bg-white p-4 shadow-sm space-y-4 lg:sticky lg:top-28 lg:block">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cierre</p>
+                          <p className="mt-2 text-sm font-black text-slate-900">Enviar</p>
+                          {failItemsWithoutCommentCount > 0 && (
+                            <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Faltan {failItemsWithoutCommentCount} observaciones obligatorias en desvíos.</p>
+                          )}
+                        </div>
+
+                        <button
+                          onClick={handleAuditSubmit}
+                          disabled={sessionItems.length === 0 || isSendingToSheet || failItemsWithoutCommentCount > 0}
+                          className={cn(
+                            "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                            sessionItems.length > 0 && !isSendingToSheet && failItemsWithoutCommentCount === 0
+                              ? (selectedRole === "Ordenes" ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]" : "bg-green-600 text-white shadow-green-100 hover:bg-green-700")
+                              : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                          )}
+                        >
+                          {isSendingToSheet ? (
+                            <>
+                              <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                              Enviando al Sheet...
+                            </>
+                          ) : (
+                            <>
+                              <Save className="w-4 h-4" />
+                              Enviar
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                  </div>
+                </div>
+
+                <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/92 p-3 backdrop-blur-xl lg:hidden">
+                  <div className="mx-auto flex max-w-6xl items-center gap-3 rounded-[1.4rem] bg-slate-950 px-4 py-3 text-white shadow-[0_20px_40px_rgba(15,23,42,0.24)]">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cierre</p>
+                      <p className="mt-1 text-sm font-black">{sessionItems.length}/{selectedAuditItems.length} respondidos</p>
+                      {failItemsWithoutCommentCount > 0 ? (
+                        <p className="mt-1 text-[11px] font-bold text-amber-300">Faltan {failItemsWithoutCommentCount} observaciones obligatorias.</p>
+                      ) : (
+                        <p className="mt-1 text-[11px] font-bold text-slate-400">Score actual {calculateCurrentScore()}%</p>
+                      )}
+                    </div>
                     <button
                       onClick={handleAuditSubmit}
-                      disabled={sessionItems.length === 0 || isSendingToSheet}
+                      disabled={sessionItems.length === 0 || isSendingToSheet || failItemsWithoutCommentCount > 0}
                       className={cn(
-                        "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
-                        sessionItems.length > 0 && !isSendingToSheet
-                          ? (selectedRole === "Ordenes" ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]" : "bg-green-600 text-white shadow-green-100 hover:bg-green-700")
-                          : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                        "inline-flex min-w-[156px] items-center justify-center gap-2 rounded-[1.1rem] px-4 py-3 text-[11px] font-black uppercase tracking-[0.16em] transition-all",
+                        sessionItems.length > 0 && !isSendingToSheet && failItemsWithoutCommentCount === 0
+                          ? "bg-white text-slate-950"
+                          : "cursor-not-allowed bg-white/10 text-slate-400"
                       )}
                     >
                       {isSendingToSheet ? (
                         <>
-                          <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                          Enviando al Sheet...
+                          <div className="h-4 w-4 rounded-full border-2 border-slate-400 border-t-slate-900 animate-spin" />
+                          Enviando
                         </>
                       ) : (
                         <>
-                          <Save className="w-4 h-4" />
-                          Enviar auditoría
+                          <Save className="h-4 w-4" />
+                          Enviar
                         </>
                       )}
                     </button>
                   </div>
                 </div>
+                </>
               )}
             </motion.div>
           )}
@@ -2372,54 +1930,22 @@ function AuditApp() {
                         )}>
                           <panel.icon className="w-5 h-5" />
                         </div>
-                        <div>
-                          <p className="text-sm font-black">{panel.label}</p>
-                          <p className={cn(
-                            "mt-1 text-xs font-bold",
-                            reportsPanel === panel.id ? "text-slate-300" : "text-slate-500"
-                          )}>
-                            {panel.description}
-                          </p>
-                        </div>
+                        <p className="text-sm font-black">{panel.label}</p>
                       </div>
                     </button>
                   ))}
                 </div>
                 <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 px-4 py-4">
-                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Modo activo</p>
+                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Activo</p>
                   <p className="mt-2 text-base font-black text-slate-900">{activeControlPanel.label}</p>
-                  <p className="mt-1 text-sm font-medium text-slate-500">{activeControlPanel.description}</p>
                 </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
-                {[
-                  {
-                    title: "Supervisión",
-                    detail: reportsPanel === "kpis" ? "Lectura de desempeño y comparación mensual." : reportsPanel === "structure" ? "Diseño operativo de formularios y categorías." : "Conectores externos y continuidad de datos.",
-                  },
-                  {
-                    title: "Decisión",
-                    detail: reportsPanel === "kpis" ? "Detectar desvíos, priorizar focos y revisar cumplimiento." : reportsPanel === "structure" ? "Ordenar qué se audita, a quién y con qué obligatoriedad." : "Definir qué sale a Sheets y qué queda como fuente oficial.",
-                  },
-                  {
-                    title: "Acción",
-                    detail: reportsPanel === "kpis" ? "Usar filtros por puesto, persona y período." : reportsPanel === "structure" ? "Crear, editar y sincronizar plantillas por sucursal." : "Mantener URLs externas centralizadas y trazables.",
-                  },
-                ].map((item) => (
-                  <div key={item.title} className="rounded-[1.6rem] border border-slate-200 bg-white px-4 py-4 shadow-sm">
-                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">{item.title}</p>
-                    <p className="mt-2 text-sm font-medium leading-relaxed text-slate-600">{item.detail}</p>
-                  </div>
-                ))}
               </div>
 
               {reportsPanel === "integrations" && (
               <>
               <div className="bg-white/90 p-6 rounded-3xl shadow-sm border border-white/80 space-y-4 backdrop-blur">
                 <div>
-                  <h3 className="text-lg font-black text-slate-900">Configuración de integraciones</h3>
-                  <p className="text-sm text-slate-500">Centralizá las URLs externas para evitar hardcodes y simplificar el alta del sistema.</p>
+                  <h3 className="text-lg font-black text-slate-900">Integraciones</h3>
                 </div>
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                   <div className="space-y-2">
@@ -2428,7 +1954,7 @@ function AuditApp() {
                       type="url"
                       value={webhookUrl}
                       onChange={(e) => setWebhookUrl(e.target.value)}
-                      placeholder="https://script.google.com/macros/s/.../exec"
+                      placeholder="https://script.google.com/macros/s/AKfycbxUbxbHYP4UIiyajM_6IVNfsFMgXEpxsvMmwyisqoo4_8lBxNzcMiPyXftxheyh7Q04/exec"
                       className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-medium text-sm focus:outline-none"
                     />
                   </div>
@@ -2444,10 +1970,9 @@ function AuditApp() {
                   </div>
                 </div>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <p className="text-xs text-slate-500">Podés precargar ambos valores desde variables Vite o guardarlos localmente desde esta pantalla.</p>
                   <button
                     onClick={saveIntegrationSettings}
-                    className="px-5 py-3 rounded-2xl bg-slate-900 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all"
+                    className="sm:ml-auto px-5 py-3 rounded-2xl bg-slate-900 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all"
                   >
                     Guardar configuración
                   </button>
@@ -2463,12 +1988,12 @@ function AuditApp() {
                 <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm">
                   <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Historial externo</p>
                   <p className="mt-2 text-lg font-black text-slate-900">{isHistorySyncConfigured ? "Disponible" : "Pendiente"}</p>
-                  <p className="mt-2 text-sm font-medium text-slate-500">Permite consumir el CSV publicado para respaldo operativo y análisis rápido.</p>
+                  <p className="mt-2 text-sm font-medium text-slate-500">Usa Apps Script para importar auditorías completas y deja el CSV como respaldo operativo.</p>
                 </div>
                 <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm">
                   <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Modelo recomendado</p>
                   <p className="mt-2 text-lg font-black text-slate-900">Fuente + espejo</p>
-                  <p className="mt-2 text-sm font-medium text-slate-500">Firestore como fuente de verdad y Sheets como capa operativa compartida.</p>
+                  <p className="mt-2 text-sm font-medium text-slate-500">Apps Script y Google Sheets como capa operativa compartida, con respaldo local en el dispositivo.</p>
                 </div>
               </div>
               </>
@@ -2476,372 +2001,67 @@ function AuditApp() {
 
               {reportsPanel === "structure" && (
               <>
-
-              <div className="bg-white/90 p-6 rounded-3xl shadow-sm border border-white/80 space-y-6 backdrop-blur">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div>
-                    <h3 className="text-lg font-black text-slate-900">Estructura de auditoría</h3>
-                    <p className="text-sm text-slate-500">Creá categorías, definí personal auditable y administrá ítems obligatorios u opcionales.</p>
-                    <p className="text-[11px] font-bold text-slate-400 mt-2">
-                      Perfil activo: {selectedStructureScope === "global" ? "General" : selectedStructureScope} · Fuente actual: {structureStorageLabel === "cloud" ? "Firestore" : "Local"}
-                      {isLoadingStructureFromCloud && " · cargando nube..."}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      onClick={handleLoadStructureFromCloud}
-                      disabled={isLoadingStructureFromCloud}
-                      className="px-4 py-3 rounded-2xl bg-white text-slate-700 text-xs font-black uppercase tracking-widest border border-slate-200 hover:border-slate-300 transition-all disabled:opacity-60"
-                    >
-                      Cargar nube
-                    </button>
-                    <button
-                      onClick={handleSaveStructureToCloud}
-                      disabled={isSavingStructureToCloud}
-                      className="px-4 py-3 rounded-2xl bg-slate-900 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all disabled:opacity-60"
-                    >
-                      {isSavingStructureToCloud ? "Guardando..." : "Guardar en nube"}
-                    </button>
-                    <button
-                      onClick={handleResetStructure}
-                      className="px-4 py-3 rounded-2xl bg-slate-100 text-slate-700 text-xs font-black uppercase tracking-widest hover:bg-slate-200 transition-all"
-                    >
-                      Restablecer base
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                  {([
-                    { id: "global", label: "General" },
-                    { id: "Salta", label: "Salta" },
-                    { id: "Jujuy", label: "Jujuy" },
-                  ] as Array<{ id: AuditStructureScope; label: string }>).map((scopeOption) => (
-                    <button
-                      key={scopeOption.id}
-                      onClick={() => setSelectedStructureScope(scopeOption.id)}
-                      className={cn(
-                        "rounded-2xl border px-4 py-3 text-left transition-all",
-                        selectedStructureScope === scopeOption.id
-                          ? "bg-slate-950 text-white border-slate-950 shadow-lg shadow-slate-200"
-                          : "bg-white text-slate-700 border-slate-200 hover:border-slate-300"
-                      )}
-                    >
-                      <p className="text-[10px] font-black uppercase tracking-[0.18em]">Perfil</p>
-                      <p className="text-sm font-black mt-1">{scopeOption.label}</p>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-                  <div className="space-y-4">
-                    <div className="rounded-[1.8rem] border border-slate-200 bg-slate-50 p-4 space-y-3">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1">Nueva categoría</label>
-                      <input
-                        type="text"
-                        value={newCategoryName}
-                        onChange={(e) => setNewCategoryName(e.target.value)}
-                        placeholder="Ej. Recepción rápida"
-                        className="w-full p-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none"
-                      />
-                      <textarea
-                        value={newCategoryStaff}
-                        onChange={(e) => setNewCategoryStaff(e.target.value)}
-                        placeholder="Personal separado por coma"
-                        className="w-full p-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none min-h-[90px] resize-none"
-                      />
-                      <button
-                        onClick={handleAddCategory}
-                        className="w-full py-3 rounded-2xl bg-slate-950 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all"
-                      >
-                        Crear categoría
-                      </button>
-                    </div>
-
-                    <div className="space-y-2">
-                      {auditCategories.map((category) => (
-                        <button
-                          key={category.id}
-                          onClick={() => setSelectedStructureCategoryId(category.id)}
-                          className={cn(
-                            "w-full text-left rounded-[1.6rem] border p-4 transition-all",
-                            selectedStructureCategoryId === category.id
-                              ? "bg-slate-950 text-white border-slate-950 shadow-lg shadow-slate-200"
-                              : "bg-white text-slate-800 border-slate-200 hover:border-slate-300"
-                          )}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <p className="text-sm font-black leading-tight">{category.name}</p>
-                              <p className={cn(
-                                "text-[11px] font-bold mt-1",
-                                selectedStructureCategoryId === category.id ? "text-slate-300" : "text-slate-500"
-                              )}>
-                                {category.items.length} ítems · {category.staffOptions.length} personas
-                              </p>
-                            </div>
-                            <span className={cn(
-                              "px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-[0.16em]",
-                              selectedStructureCategoryId === category.id ? "bg-white/10 text-white" : "bg-slate-100 text-slate-500"
-                            )}>
-                              {category.items.filter((item) => item.required).length} oblig.
-                            </span>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {selectedStructureCategory && (
-                    <div className="space-y-4">
-                      <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 space-y-4">
-                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                          <div>
-                            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Categoría activa</p>
-                            <h4 className="text-lg font-black text-slate-900">{selectedStructureCategory.name}</h4>
-                          </div>
-                          <button
-                            onClick={() => handleDeleteCategory(selectedStructureCategory.id)}
-                            className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-red-50 text-red-600 text-xs font-black uppercase tracking-widest hover:bg-red-100 transition-all"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                            Eliminar categoría
-                          </button>
-                        </div>
-
-                        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                          <div className="space-y-2">
-                            <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1">Nombre visible</label>
-                            <input
-                              type="text"
-                              value={selectedStructureCategory.name}
-                              onChange={(e) => updateCategory(selectedStructureCategory.id, (category) => ({ ...category, name: e.target.value }))}
-                              className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none"
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 px-1">Personal auditable</label>
-                            <textarea
-                              value={selectedStructureCategory.staffOptions.join(", ")}
-                              onChange={(e) => updateCategory(selectedStructureCategory.id, (category) => ({
-                                ...category,
-                                staffOptions: e.target.value.split(",").map((value) => value.trim()).filter(Boolean),
-                              }))}
-                              className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none min-h-[104px] resize-none"
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 space-y-4">
-                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                          <div>
-                            <h4 className="text-lg font-black text-slate-900">Ítems de auditoría</h4>
-                            <p className="text-sm text-slate-500">Cada cambio impacta en el formulario dinámico y en las validaciones de cierre.</p>
-                          </div>
-                          <div className="rounded-2xl bg-slate-50 px-4 py-3 border border-slate-200">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Resumen</p>
-                            <p className="text-sm font-black text-slate-900">{selectedStructureCategory.items.length} ítems</p>
-                          </div>
-                        </div>
-
-                        <div className="rounded-[1.5rem] border border-dashed border-slate-300 bg-slate-50 p-4 space-y-3">
-                          <input
-                            type="text"
-                            value={newItemText}
-                            onChange={(e) => setNewItemText(e.target.value)}
-                            placeholder="Texto del nuevo ítem"
-                            className="w-full p-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none"
-                          />
-                          <label className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700">
-                            <input
-                              type="checkbox"
-                              checked={newItemRequired}
-                              onChange={(e) => setNewItemRequired(e.target.checked)}
-                              className="h-4 w-4 rounded border-slate-300"
-                            />
-                            Marcar como obligatorio
-                          </label>
-                          <button
-                            onClick={handleAddItem}
-                            className="w-full py-3 rounded-2xl bg-blue-600 text-white text-xs font-black uppercase tracking-widest hover:bg-blue-700 transition-all"
-                          >
-                            Agregar ítem
-                          </button>
-                        </div>
-
-                        <div className="space-y-3">
-                          {selectedStructureCategory.items.map((structureItem, index) => (
-                            <div key={structureItem.id} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4 space-y-3">
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.16em] bg-slate-900 text-white">
-                                    Item {String(index + 1).padStart(2, "0")}
-                                  </span>
-                                  <span className={cn(
-                                    "text-[10px] font-black px-2.5 py-1 rounded-full uppercase tracking-[0.16em] border",
-                                    structureItem.required
-                                      ? "border-blue-200 bg-blue-50 text-blue-700"
-                                      : "border-slate-200 bg-white text-slate-500"
-                                  )}>
-                                    {structureItem.required ? "Obligatorio" : "Opcional"}
-                                  </span>
-                                </div>
-                                <button
-                                  onClick={() => updateCategory(selectedStructureCategory.id, (category) => ({
-                                    ...category,
-                                    items: category.items.filter((item) => item.id !== structureItem.id),
-                                  }))}
-                                  className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-red-50 text-red-600 text-[10px] font-black uppercase tracking-widest hover:bg-red-100 transition-all"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                  Quitar
-                                </button>
-                              </div>
-
-                              <textarea
-                                value={structureItem.text}
-                                onChange={(e) => updateCategory(selectedStructureCategory.id, (category) => ({
-                                  ...category,
-                                  items: category.items.map((item) =>
-                                    item.id === structureItem.id ? { ...item, text: e.target.value } : item
-                                  ),
-                                }))}
-                                className="w-full p-4 bg-white border border-slate-200 rounded-2xl text-sm font-medium focus:outline-none min-h-[96px] resize-none"
-                              />
-
-                              <label className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold text-slate-700">
-                                <input
-                                  type="checkbox"
-                                  checked={structureItem.required}
-                                  onChange={(e) => updateCategory(selectedStructureCategory.id, (category) => ({
-                                    ...category,
-                                    items: category.items.map((item) =>
-                                      item.id === structureItem.id ? { ...item, required: e.target.checked } : item
-                                    ),
-                                  }))}
-                                  className="h-4 w-4 rounded border-slate-300"
-                                />
-                                Este ítem debe responderse antes de finalizar la auditoría
-                              </label>
-                            </div>
-                          ))}
-
-                          {selectedStructureCategory.items.length === 0 && (
-                            <div className="rounded-[1.5rem] border border-dashed border-slate-300 bg-slate-50 p-6 text-center">
-                              <p className="text-sm font-bold text-slate-500">Esta categoría todavía no tiene ítems.</p>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <StructurePanel
+                selectedStructureScope={selectedStructureScope}
+                setSelectedStructureScope={setSelectedStructureScope}
+                structureStorageLabel={structureStorageLabel}
+                isLoadingStructureFromCloud={isLoadingStructureFromCloud}
+                isSavingStructureToCloud={isSavingStructureToCloud}
+                handleLoadStructureFromCloud={handleLoadStructureFromCloud}
+                handleSaveStructureToCloud={handleSaveStructureToCloud}
+                handleResetStructure={handleResetStructure}
+                auditCategories={auditCategories}
+                selectedStructureCategory={selectedStructureCategory}
+                selectedStructureCategoryId={selectedStructureCategoryId}
+                setSelectedStructureCategoryId={setSelectedStructureCategoryId}
+                updateCategory={updateCategory}
+                handleDeleteCategory={handleDeleteCategory}
+                newCategoryName={newCategoryName}
+                setNewCategoryName={setNewCategoryName}
+                newCategoryDescription={newCategoryDescription}
+                setNewCategoryDescription={setNewCategoryDescription}
+                newCategoryStaff={newCategoryStaff}
+                setNewCategoryStaff={setNewCategoryStaff}
+                handleAddCategory={handleAddCategory}
+                newItemText={newItemText}
+                setNewItemText={setNewItemText}
+                newItemDescription={newItemDescription}
+                setNewItemDescription={setNewItemDescription}
+                newItemGuidance={newItemGuidance}
+                setNewItemGuidance={setNewItemGuidance}
+                newItemBlock={newItemBlock}
+                setNewItemBlock={setNewItemBlock}
+                newItemSector={newItemSector}
+                setNewItemSector={setNewItemSector}
+                newItemResponsibleRoles={newItemResponsibleRoles}
+                setNewItemResponsibleRoles={setNewItemResponsibleRoles}
+                newItemPriority={newItemPriority}
+                setNewItemPriority={setNewItemPriority}
+                newItemWeight={newItemWeight}
+                setNewItemWeight={setNewItemWeight}
+                newItemRequired={newItemRequired}
+                setNewItemRequired={setNewItemRequired}
+                newItemAllowsNa={newItemAllowsNa}
+                setNewItemAllowsNa={setNewItemAllowsNa}
+                newItemActive={newItemActive}
+                setNewItemActive={setNewItemActive}
+                newItemRequiresCommentOnFail={newItemRequiresCommentOnFail}
+                setNewItemRequiresCommentOnFail={setNewItemRequiresCommentOnFail}
+                handleAddItem={handleAddItem}
+              />
               </>
               )}
 
               {reportsPanel === "kpis" && (
               <>
-              <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Puesto</label>
-                    <select 
-                      value={reportFilter.role}
-                      onChange={(e) => setReportFilter({ ...reportFilter, role: e.target.value as Role })}
-                      className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-sm font-bold"
-                    >
-                      {auditCategories.map(category => <option key={category.id} value={category.name}>{category.name}</option>)}
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Personal</label>
-                    <select 
-                      value={reportFilter.staff}
-                      onChange={(e) => setReportFilter({ ...reportFilter, staff: e.target.value })}
-                      className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-sm font-bold"
-                    >
-                      <option value="">Todos</option>
-                      {allStaffOptions.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Mes</label>
-                    <input 
-                      type="month"
-                      value={reportFilter.month}
-                      onChange={(e) => setReportFilter({ ...reportFilter, month: e.target.value })}
-                      className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl text-sm font-bold"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Matrix Table */}
-              <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-[10px]">
-                    <thead>
-                      <tr className="bg-[#002060] text-white">
-                        <th className="p-2 border border-white/20 text-left min-w-[200px]">
-                          {new Date(reportFilter.month + "-02").toLocaleString('es-ES', { month: 'long' }).toUpperCase()}
-                        </th>
-                        {filteredReportSessions.map(s => (
-                            <th key={s.id} className="p-2 border border-white/20 text-center min-w-[60px]">
-                              {s.orderNumber || "S/N"}
-                            </th>
-                          ))
-                        }
-                        <th className="p-2 border border-white/20 text-center min-w-[60px] bg-blue-900">PROM</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reportCategoryItems.map((questionItem, qIdx) => {
-                        const question = questionItem.text;
-                        const sessions = filteredReportSessions;
-                        
-                        const scores = sessions.map(s => {
-                          const item = s.items.find(i => i.question === question);
-                          if (!item || item.status === "na") return null;
-                          return item.status === "pass" ? 1 : 0;
-                        });
-
-                        const validScores = scores.filter(s => s !== null) as number[];
-                        const avg = validScores.length > 0 
-                          ? validScores.reduce((a, b) => a + b, 0) / validScores.length 
-                          : 0;
-
-                        return (
-                          <tr key={qIdx} className={qIdx % 2 === 0 ? "bg-white" : "bg-gray-50"}>
-                            <td className="p-2 border border-gray-100 font-bold text-gray-700">
-                              {question}
-                            </td>
-                            {scores.map((score, sIdx) => (
-                              <td 
-                                key={sIdx} 
-                                className={cn(
-                                  "p-2 border border-gray-100 text-center font-black",
-                                  score === 1 ? "bg-green-50 text-green-600" : 
-                                  score === 0 ? "bg-red-50 text-red-600" : "text-gray-300"
-                                )}
-                              >
-                                {score === null ? "-" : score}
-                              </td>
-                            ))}
-                            <td className={cn(
-                              "p-2 border border-gray-100 text-center font-black",
-                              avg >= 0.9 ? "text-green-600" : avg >= 0.7 ? "text-yellow-600" : "text-red-600"
-                            )}>
-                              {avg.toFixed(2)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <ControlKpisPanel
+                reportFilter={reportFilter}
+                setReportFilter={setReportFilter}
+                auditCategories={auditCategories}
+                allStaffOptions={allStaffOptions}
+                filteredReportSessions={filteredReportSessions}
+                reportCategoryItems={reportCategoryItems}
+              />
               </>
               )}
             </motion.div>
@@ -2854,322 +2074,163 @@ function AuditApp() {
               exit={{ opacity: 0, x: -20 }}
               className="space-y-6"
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => setView("dashboard")}
-                    className="p-2 -ml-2 text-gray-400 hover:text-gray-900"
-                  >
-                    <ArrowLeft className="w-6 h-6" />
-                  </button>
-                  <h2 className="text-2xl font-bold">Historial</h2>
-                </div>
-                <div className="hidden md:flex items-center gap-2">
-                  <button
-                    onClick={() => setHistoryPanel("exports")}
-                    className="flex items-center gap-2 px-4 py-2 bg-white text-slate-700 rounded-xl border border-slate-200 font-bold text-xs uppercase tracking-widest hover:border-slate-300 transition-all"
-                  >
-                    <FileText className="w-4 h-4" />
-                    Exportación
-                  </button>
-                  <button 
-                    onClick={exportToCSV}
-                    className="flex items-center gap-2 px-4 py-2 bg-green-50 text-green-600 rounded-xl font-bold text-xs uppercase tracking-widest hover:bg-green-100 transition-all"
-                  >
-                    <Save className="w-4 h-4" />
-                    Exportar CSV
-                  </button>
-                </div>
-              </div>
-
-              <div className="glass-panel rounded-[2rem] p-3 shadow-sm">
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                  <button
-                    onClick={() => setHistoryPanel("records")}
-                    className={cn(
-                      "rounded-[1.4rem] border px-4 py-4 text-left transition-all",
-                      historyPanel === "records"
-                        ? "border-slate-950 bg-slate-950 text-white"
-                        : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
-                    )}
-                  >
-                    <p className="text-sm font-black">Registros</p>
-                    <p className={cn("mt-1 text-xs font-bold", historyPanel === "records" ? "text-slate-300" : "text-slate-500")}>
-                      Vista operativa con búsqueda y lectura inmediata.
-                    </p>
-                  </button>
-                  <button
-                    onClick={() => setHistoryPanel("exports")}
-                    className={cn(
-                      "rounded-[1.4rem] border px-4 py-4 text-left transition-all",
-                      historyPanel === "exports"
-                        ? "border-slate-950 bg-slate-950 text-white"
-                        : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
-                    )}
-                  >
-                    <p className="text-sm font-black">Exportación y sync</p>
-                    <p className={cn("mt-1 text-xs font-bold", historyPanel === "exports" ? "text-slate-300" : "text-slate-500")}>
-                      Salida a CSV y control de fuente externa.
-                    </p>
-                  </button>
-                </div>
-              </div>
-
-              {historyPanel === "records" && (
-                <>
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-4">
-                    {[
-                      { label: "Resultados", value: filteredHistory.length, detail: "auditorías visibles", icon: ClipboardList, tone: "slate" },
-                      { label: "Promedio", value: `${historyAverageScore}%`, detail: "cumplimiento sobre la vista", icon: TrendingUp, tone: "emerald" },
-                      { label: "Desvíos", value: nonCompliantAudits, detail: "registros debajo de 90%", icon: AlertCircle, tone: "amber" },
-                      { label: "Último cierre", value: latestHistoryItem?.date ?? "-", detail: latestHistoryItem?.location ?? "sin datos", icon: Clock, tone: "blue" },
-                    ].map((card) => (
-                      <div key={card.label} className="glass-panel rounded-[1.7rem] p-5 shadow-sm">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">{card.label}</p>
-                            <p className="mt-3 text-2xl font-black text-slate-950">{card.value}</p>
-                            <p className="mt-2 text-sm font-medium text-slate-500">{card.detail}</p>
-                          </div>
-                          <div className={cn(
-                            "flex h-11 w-11 items-center justify-center rounded-2xl",
-                            card.tone === "slate" && "bg-slate-950 text-white",
-                            card.tone === "emerald" && "bg-emerald-50 text-emerald-600",
-                            card.tone === "amber" && "bg-amber-50 text-amber-600",
-                            card.tone === "blue" && "bg-blue-50 text-blue-600"
-                          )}>
-                            <card.icon className="w-5 h-5" />
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.15fr)_380px]">
-                    <div className="space-y-4">
-                      <div className="glass-panel rounded-[2rem] p-4 shadow-sm space-y-4">
-                        <div className="relative">
-                          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-                          <input 
-                            type="text" 
-                            placeholder="Buscar por asesor, OR o ubicación..."
-                            value={searchTerm}
-                            onChange={(e) => setSearchTerm(e.target.value)}
-                            className="w-full pl-12 pr-4 py-4 bg-white border border-gray-200 rounded-2xl text-sm focus:outline-none"
-                          />
-                        </div>
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                          <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Lectura</p>
-                            <p className="mt-2 text-sm font-black text-slate-900">Listado maestro</p>
-                            <p className="mt-2 text-sm font-medium text-slate-500">Seleccioná un registro para abrir el detalle completo.</p>
-                          </div>
-                          <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Filtro</p>
-                            <p className="mt-2 text-sm font-black text-slate-900">Búsqueda unificada</p>
-                            <p className="mt-2 text-sm font-medium text-slate-500">Soporta asesor, categoría, ubicación y OR.</p>
-                          </div>
-                          <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Acción</p>
-                            <p className="mt-2 text-sm font-black text-slate-900">Exportar o sincronizar</p>
-                            <p className="mt-2 text-sm font-medium text-slate-500">Pasá a la segunda pestaña para salida y verificación externa.</p>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="space-y-3">
-                        {filteredHistory.map((item) => (
-                          <button
-                            key={item.id}
-                            onClick={() => setSelectedAudit(item)}
-                            className={cn(
-                              "w-full rounded-[2rem] border p-5 text-left shadow-sm transition-all",
-                              selectedHistoryAudit?.id === item.id
-                                ? "border-slate-900 bg-slate-900 text-white"
-                                : "border-slate-200 bg-white hover:border-slate-300"
-                            )}
-                          >
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="flex items-center gap-3 min-w-0">
-                                <div className={cn(
-                                  "w-14 h-14 rounded-2xl flex items-center justify-center font-bold text-xl shrink-0",
-                                  selectedHistoryAudit?.id === item.id
-                                    ? "bg-white/10 text-white"
-                                    : item.totalScore >= 90 ? "bg-green-50 text-green-600" : item.totalScore >= 70 ? "bg-yellow-50 text-yellow-600" : "bg-red-50 text-red-600"
-                                )}>
-                                  {item.totalScore}%
-                                </div>
-                                <div className="min-w-0">
-                                  <p className={cn("font-black leading-none mb-1 truncate", selectedHistoryAudit?.id === item.id ? "text-white" : "text-gray-900")}>{item.location}</p>
-                                  <p className={cn("text-[10px] font-black uppercase tracking-widest", selectedHistoryAudit?.id === item.id ? "text-slate-300" : "text-gray-400")}>{item.date}</p>
-                                  <p className={cn("mt-2 text-xs font-bold truncate", selectedHistoryAudit?.id === item.id ? "text-slate-200" : "text-gray-600")}>{item.staffName || "Sin responsable"}</p>
-                                </div>
-                              </div>
-                              <ChevronRight className={cn("w-5 h-5 shrink-0", selectedHistoryAudit?.id === item.id ? "text-white" : "text-slate-400")} />
-                            </div>
-                            <div className={cn("mt-4 flex items-center justify-between border-t pt-4", selectedHistoryAudit?.id === item.id ? "border-white/10" : "border-gray-100")}>
-                              <div className="flex flex-col">
-                                <span className={cn("text-[10px] font-black uppercase tracking-widest leading-none mb-1", selectedHistoryAudit?.id === item.id ? "text-slate-300" : "text-gray-400")}>
-                                  {item.items[0]?.category || "General"}
-                                </span>
-                                {item.orderNumber && (
-                                  <span className={cn("text-xs font-black", selectedHistoryAudit?.id === item.id ? "text-cyan-300" : "text-blue-600")}>OR: {item.orderNumber}</span>
-                                )}
-                              </div>
-                              <span className={cn("text-[10px] font-bold uppercase tracking-tighter", selectedHistoryAudit?.id === item.id ? "text-slate-300" : "text-gray-400")}>{item.items.length} ítems</span>
-                            </div>
-                          </button>
-                        ))}
-
-                        {filteredHistory.length === 0 && (
-                          <div className="rounded-[2rem] border border-dashed border-slate-300 bg-white px-5 py-10 text-center">
-                            <p className="text-sm font-black text-slate-700">No hay auditorías para ese criterio.</p>
-                            <p className="mt-2 text-sm font-medium text-slate-500">Probá con otro nombre, ubicación o categoría.</p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="space-y-4">
-                      {selectedHistoryAudit ? (
-                        <div className="glass-panel rounded-[2rem] p-6 shadow-sm space-y-5 xl:sticky xl:top-28">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Detalle seleccionado</p>
-                              <h3 className="mt-2 text-xl font-black text-slate-950">{selectedHistoryAudit.location}</h3>
-                              <p className="mt-1 text-xs font-bold uppercase tracking-widest text-slate-500">{selectedHistoryAudit.role || selectedHistoryAudit.items[0]?.category} · {selectedHistoryAudit.date}</p>
-                            </div>
-                            <div className={cn(
-                              "rounded-2xl px-4 py-3 text-lg font-black",
-                              selectedHistoryAudit.totalScore >= 90 ? "bg-green-50 text-green-600" : selectedHistoryAudit.totalScore >= 70 ? "bg-yellow-50 text-yellow-600" : "bg-red-50 text-red-600"
-                            )}>
-                              {selectedHistoryAudit.totalScore}%
-                            </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-3">
-                            <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Personal</p>
-                              <p className="mt-2 text-sm font-black text-slate-900">{selectedHistoryAudit.staffName || "N/A"}</p>
-                            </div>
-                            <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4">
-                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Ubicación</p>
-                              <p className="mt-2 text-sm font-black text-slate-900">{selectedHistoryAudit.location}</p>
-                            </div>
-                            {selectedHistoryAudit.orderNumber && (
-                              <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4 col-span-2">
-                                <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Orden</p>
-                                <p className="mt-2 text-sm font-black text-blue-600">{selectedHistoryAudit.orderNumber}</p>
-                              </div>
-                            )}
-                          </div>
-
-                          <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
-                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Resultados por ítem</p>
-                            {selectedHistoryAudit.items.map((item, idx) => (
-                              <div key={idx} className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4 space-y-2">
-                                <div className="flex items-start justify-between gap-4">
-                                  <p className="text-xs font-bold leading-snug text-slate-700">{item.question}</p>
-                                  <span className={cn(
-                                    "shrink-0 rounded-lg px-2 py-1 text-[10px] font-black uppercase",
-                                    item.status === "pass" ? "bg-green-100 text-green-600" : item.status === "fail" ? "bg-red-100 text-red-600" : "bg-slate-200 text-slate-500"
-                                  )}>
-                                    {item.status === "pass" ? "Cumple" : item.status === "fail" ? "No cumple" : "N/A"}
-                                  </span>
-                                </div>
-                                {item.comment && <p className="text-[11px] italic text-slate-500">"{item.comment}"</p>}
-                              </div>
-                            ))}
-                          </div>
-
-                          {selectedHistoryAudit.notes && (
-                            <div className="rounded-[1.4rem] border border-blue-100 bg-blue-50 px-4 py-4">
-                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-400">Notas generales</p>
-                              <p className="mt-2 text-sm leading-relaxed text-blue-800">{selectedHistoryAudit.notes}</p>
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="rounded-[2rem] border border-dashed border-slate-300 bg-white px-5 py-10 text-center">
-                          <p className="text-sm font-black text-slate-700">Seleccioná una auditoría para ver el detalle.</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </>
-              )}
-
-              {historyPanel === "exports" && (
-                <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
-                  <div className="glass-panel rounded-[2rem] p-6 shadow-sm space-y-5">
-                    <div>
-                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Exportación</p>
-                      <h3 className="mt-2 text-xl font-black text-slate-950">Salida operativa y respaldo</h3>
-                      <p className="mt-2 text-sm font-medium text-slate-500">Modelo habitual en sistemas de auditoría: exportar para análisis puntual y sincronizar con una fuente compartida para reporting externo.</p>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                      <div className="rounded-[1.6rem] border border-slate-200 bg-white p-5 space-y-3">
-                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">CSV local</p>
-                        <p className="text-sm font-medium text-slate-500">Descargá el historial para compartirlo, archivarlo o cruzarlo externamente.</p>
-                        <button 
-                          onClick={exportToCSV}
-                          className="inline-flex items-center gap-2 rounded-2xl bg-slate-950 px-4 py-3 text-xs font-black uppercase tracking-widest text-white hover:bg-slate-800 transition-all"
-                        >
-                          <Save className="w-4 h-4" />
-                          Exportar ahora
-                        </button>
-                      </div>
-                      <div className="rounded-[1.6rem] border border-slate-200 bg-white p-5 space-y-3">
-                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Fuente externa</p>
-                        <p className="text-sm font-medium text-slate-500">Leer el CSV publicado permite verificar consistencia y operación fuera de la app.</p>
-                        <button 
-                          onClick={syncData}
-                          disabled={isSyncing || !isHistorySyncConfigured}
-                          className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-black uppercase tracking-widest text-slate-700 hover:border-slate-300 transition-all disabled:opacity-50"
-                        >
-                          <Clock className="w-4 h-4" />
-                          {isSyncing ? "Sincronizando..." : "Leer fuente"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div className="glass-panel rounded-[2rem] p-6 shadow-sm space-y-4">
-                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Buenas prácticas</p>
-                      <div className="space-y-3 text-sm font-medium text-slate-600">
-                        <p>Firestore como fuente oficial para trazabilidad y control.</p>
-                        <p>Sheets o CSV como capa de intercambio y reporting operativo.</p>
-                        <p>Exportación y sincronización separadas para evitar mezcla de responsabilidades.</p>
-                      </div>
-                    </div>
-                    <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm space-y-3">
-                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Estado actual</p>
-                      <div className="rounded-[1.4rem] bg-slate-50 px-4 py-4 border border-slate-200">
-                        <p className="text-sm font-black text-slate-900">CSV publicado</p>
-                        <p className="mt-2 text-sm font-medium text-slate-500">{isHistorySyncConfigured ? "Configurado para lectura externa." : "Todavía no configurado."}</p>
-                      </div>
-                      <div className="rounded-[1.4rem] bg-slate-50 px-4 py-4 border border-slate-200">
-                        <p className="text-sm font-black text-slate-900">Total de registros</p>
-                        <p className="mt-2 text-sm font-medium text-slate-500">{history.length} auditorías disponibles para exportar.</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
+              <HistoryView
+                historyPanel={historyPanel}
+                setHistoryPanel={setHistoryPanel}
+                filteredHistory={filteredHistory}
+                selectedHistoryAudit={selectedHistoryAudit}
+                historyAverageScore={historyAverageScore}
+                nonCompliantAudits={nonCompliantAudits}
+                latestHistoryItem={latestHistoryItem}
+                searchTerm={searchTerm}
+                setSearchTerm={setSearchTerm}
+                onBack={() => setView("dashboard")}
+                onSelectAudit={setSelectedAudit}
+                onExportCsv={exportToCSV}
+                onSyncData={syncData}
+                isSyncing={isSyncing}
+                isHistorySyncConfigured={isHistorySyncConfigured}
+                isUsingExternalHistory={isUsingExternalHistory}
+                hasWebhookUrl={hasWebhookUrl}
+                hasSheetCsvUrl={hasSheetCsvUrl}
+                totalHistoryCount={history.length}
+              />
             </motion.div>
           )}
         </AnimatePresence>
       </main>
 
-      <Modal 
+      {(view === "dashboard" || view === "history" || view === "reports") && (
+        <button
+          onClick={startNewAudit}
+          className="fixed bottom-5 right-5 z-30 inline-flex h-14 w-14 items-center justify-center rounded-full bg-blue-600 text-white shadow-2xl shadow-blue-300/60 transition-all active:scale-95 lg:hidden"
+          aria-label="Nueva auditoría"
+        >
+          <Plus className="h-6 w-6" />
+        </button>
+      )}
+
+      <AppModal 
         isOpen={showConfirmModal}
         onClose={() => setShowConfirmModal(false)}
         onConfirm={submitAudit}
         title="¿Finalizar Auditoría?"
         message={`Quedan ${optionalPendingCount} ítems opcionales sin responder. ¿Deseás finalizar igualmente?`}
       />
+
+      <AnimatePresence>
+        {showBatchReportModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowBatchReportModal(false)}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 20 }}
+              className="panel-premium relative flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-[2.3rem]"
+            >
+              <div className="flex items-center justify-between gap-4 border-b border-slate-200 px-6 py-5 md:px-8">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Reporte</p>
+                  <h3 className="mt-2 text-2xl font-black tracking-[-0.03em] text-slate-950">Puntajes detallados</h3>
+                </div>
+                <button
+                  onClick={() => setShowBatchReportModal(false)}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-200 text-slate-500 transition-all hover:border-slate-300 hover:text-slate-900"
+                >
+                  <XCircle className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5 md:px-8">
+                {completedAuditReports.map((report) => {
+                  const sectionScores = getSectionScores(report.templateItems, report.session);
+
+                  return (
+                    <div key={`${report.role}-${report.session.id}`} className="rounded-[1.9rem] border border-slate-200 bg-white p-5 shadow-sm">
+                      <div className="flex flex-col gap-4 border-b border-slate-100 pb-4 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">{report.session.location}</p>
+                          <h4 className="mt-2 text-xl font-black text-slate-950">{report.role}</h4>
+                          <p className="mt-1 text-sm font-bold text-slate-500">{report.session.staffName || report.auditorName} · {report.session.date}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="rounded-2xl bg-emerald-50 px-4 py-3 text-center text-emerald-700">
+                            <p className="text-[10px] font-black uppercase tracking-[0.16em]">Score</p>
+                            <p className="mt-1 text-xl font-black">{report.session.totalScore}%</p>
+                          </div>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => generateAuditPdfReport({
+                              appTitle,
+                              session: report.session,
+                              auditorName: report.auditorName,
+                              templateItems: report.templateItems,
+                            })}
+                          >
+                            <FileText className="h-4 w-4" />
+                            PDF
+                          </Button>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-4">
+                        {sectionScores.map((section) => (
+                          <div key={section.sectionName} className="rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4">
+                            <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">{section.sectionName}</p>
+                            <p className="mt-2 text-lg font-black text-slate-950">{section.score}%</p>
+                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+                              <span>{section.passCount} ok</span>
+                              <span>{section.failCount} fail</span>
+                              <span>{section.naCount} n/a</span>
+                              <span>{section.pendingCount} pend.</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="mt-4 space-y-2">
+                        {report.session.items.map((item) => (
+                          <div key={item.id} className="rounded-[1.2rem] border border-slate-200 bg-white px-4 py-3">
+                            <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                              <p className="text-sm font-bold text-slate-800">{item.question}</p>
+                              <span className={cn(
+                                "inline-flex rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-[0.14em]",
+                                item.status === "pass"
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : item.status === "fail"
+                                    ? "bg-red-100 text-red-700"
+                                    : "bg-slate-100 text-slate-500"
+                              )}>
+                                {getAuditItemStatusLabel(item.status)}
+                              </span>
+                            </div>
+                            {item.comment && (
+                              <p className="mt-2 text-xs font-medium text-slate-500">{item.comment}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="border-t border-slate-200 px-6 py-4 md:px-8">
+                <Button className="w-full" onClick={() => setShowBatchReportModal(false)}>
+                  Cerrar
+                </Button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {selectedAudit && view !== "history" && (

@@ -36,9 +36,9 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isAuthenticated() && 
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-         (request.auth.token.email == "tesis.fiunju@gmail.com" && request.auth.token.email_verified == true));
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
     }
 
     function isValidAudit(data) {
@@ -66,7 +66,8 @@ service cloud.firestore {
     }
 
     match /appConfig/{configId} {
-      allow read, write: if isAuthenticated();
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
     }
 
     match /users/{userId} {

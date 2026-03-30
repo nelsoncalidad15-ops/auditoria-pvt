@@ -1,6 +1,24 @@
 export type Location = "Salta" | "Jujuy";
 
 export type AuditStructureScope = "global" | Location;
+export type AuditItemPriority = "high" | "medium" | "low";
+export type AuditItemStatus = "pass" | "fail" | "na";
+export type AuditUserProfile = "auditor" | "supervisor" | "consulta";
+
+export type OrResponsibleRole =
+  | "asesor"
+  | "tecnico"
+  | "controller"
+  | "lavador"
+  | "repuestos";
+
+export type OrAuditSector =
+  | "recepcion"
+  | "taller"
+  | "control_calidad"
+  | "lavado"
+  | "repuestos"
+  | "resumen";
 
 export type Role = string;
 
@@ -13,11 +31,23 @@ export interface AuditTemplateItem {
   id: string;
   text: string;
   required: boolean;
+  block?: string;
+  priority?: AuditItemPriority;
+  guidance?: string;
+  requiresCommentOnFail?: boolean;
+  description?: string;
+  responsibleRoles?: OrResponsibleRole[];
+  sector?: OrAuditSector;
+  allowsNa?: boolean;
+  weight?: number;
+  order?: number;
+  active?: boolean;
 }
 
 export interface AuditCategory {
   id: string;
   name: string;
+  description?: string;
   items: AuditTemplateItem[];
   staffOptions: string[];
 }
@@ -26,14 +56,44 @@ export interface AuditItem {
   id: string;
   question: string;
   category: Role;
-  status: "pass" | "fail" | "na";
+  status: AuditItemStatus;
   comment?: string;
   photoUrl?: string;
+  description?: string;
+  responsibleRoles?: OrResponsibleRole[];
+  sector?: OrAuditSector;
+  weight?: number;
+  allowsNa?: boolean;
+  evidenceComment?: string;
+}
+
+export interface OrAuditParticipants {
+  asesorServicio: string;
+  tecnico: string;
+  controller: string;
+  lavador: string;
+  repuestos?: string;
+}
+
+export interface AuditRoleScore {
+  role: OrResponsibleRole;
+  totalApplicableWeight: number;
+  obtainedWeight: number;
+  compliance: number;
+  itemsCount: number;
+}
+
+export interface AuditPersonScore {
+  role: OrResponsibleRole;
+  personName: string;
+  compliance: number;
+  evaluations: number;
 }
 
 export interface AuditSession {
   id: string;
   date: string;
+  auditBatchName?: string;
   auditorId: string;
   location: Location;
   staffName?: string;
@@ -42,4 +102,8 @@ export interface AuditSession {
   totalScore: number;
   orderNumber?: string;
   notes?: string;
+  participants?: Partial<OrAuditParticipants>;
+  roleScores?: AuditRoleScore[];
+  entityType?: "general" | "or";
+  userProfile?: AuditUserProfile;
 }

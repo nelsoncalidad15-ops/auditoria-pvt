@@ -9,6 +9,10 @@ function getAuditStructureDocPath(scope: AuditStructureScope) {
 }
 
 export async function loadAuditCategoriesFromCloud(scope: AuditStructureScope = "global") {
+  if (!db) {
+    return null;
+  }
+
   const docPath = getAuditStructureDocPath(scope);
   try {
     const snapshot = await getDoc(doc(db, ...docPath));
@@ -28,6 +32,10 @@ export async function saveAuditCategoriesToCloud(
   scope: AuditStructureScope = "global",
   updatedByEmail?: string | null
 ) {
+  if (!db) {
+    throw new Error("Firebase no está configurado para guardar estructura en la nube.");
+  }
+
   const docPath = getAuditStructureDocPath(scope);
   try {
     await setDoc(
