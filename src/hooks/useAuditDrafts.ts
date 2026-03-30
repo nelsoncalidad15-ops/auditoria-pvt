@@ -29,6 +29,35 @@ interface UseAuditDraftsParams {
   onResume: (draft: AuditDraft) => void;
 }
 
+function inferDraftRole(draft: Partial<AuditDraft>): Role | undefined {
+  if (draft.role) {
+    return draft.role;
+  }
+
+  const itemRole = draft.items?.find((item) => item.category)?.category;
+  return itemRole;
+}
+
+function normalizeDraft(rawDraft: Partial<AuditDraft>): AuditDraft {
+  const role = inferDraftRole(rawDraft);
+  const staffName = rawDraft.staffName?.trim() || (role === "Ordenes" ? rawDraft.participants?.asesorServicio?.trim() : undefined);
+
+  return {
+    id: rawDraft.id || crypto.randomUUID(),
+    date: rawDraft.date || new Date().toISOString().split("T")[0],
+    auditBatchName: rawDraft.auditBatchName,
+    auditorId: rawDraft.auditorId,
+    location: rawDraft.location,
+    staffName: staffName || undefined,
+    role,
+    items: Array.isArray(rawDraft.items) ? rawDraft.items : [],
+    orderNumber: rawDraft.orderNumber?.trim() || undefined,
+    notes: rawDraft.notes?.trim() || undefined,
+    participants: rawDraft.participants,
+    updatedAt: rawDraft.updatedAt || new Date().toISOString(),
+  };
+}
+
 export function useAuditDrafts({ selectedRole, selectedStaff, session, sessionItems, view, onResume }: UseAuditDraftsParams) {
   const [draftAudits, setDraftAudits] = useState<AuditDraft[]>(() => {
     if (typeof window === "undefined") {
@@ -42,7 +71,7 @@ export function useAuditDrafts({ selectedRole, selectedStaff, session, sessionIt
       }
 
       const parsed = JSON.parse(rawDrafts);
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed) ? parsed.map((draft) => normalizeDraft(draft)) : [];
     } catch {
       return [];
     }
@@ -55,7 +84,7 @@ export function useAuditDrafts({ selectedRole, selectedStaff, session, sessionIt
       return;
     }
 
-    window.localStorage.setItem(AUDIT_DRAFTS_STORAGE_KEY, JSON.stringify(nextDrafts));
+    window.localStorage.setItem(AUDIT_DRAFTS_STORAGE_KEY, JSON.stringify(nextDrafts.map((draft) => normalizeDraft(draft))));
   }, []);
 
   const removeDraftAudit = useCallback((draftId: string) => {
@@ -104,22 +133,29 @@ export function useAuditDrafts({ selectedRole, selectedStaff, session, sessionIt
       return;
     }
 
-    const nextDraft: AuditDraft = {
+    const currentDraft = draftAudits.find((draft) => draft.id === session.id);
+    const persistedRole = selectedRole || currentDraft?.role;
+    const persistedStaffName = (
+      persistedRole === "Ordenes"
+        ? session.participants?.asesorServicio?.trim()
+        : selectedStaff.trim()
+    ) || currentDraft?.staffName;
+
+    const nextDraft: AuditDraft = normalizeDraft({
       id: session.id,
       date: session.date || new Date().toISOString().split("T")[0],
       auditBatchName: session.auditBatchName,
       auditorId: session.auditorId,
       location: session.location,
-      staffName: selectedStaff || undefined,
-      role: selectedRole || undefined,
+      staffName: persistedStaffName,
+      role: persistedRole,
       items: sessionItems,
       orderNumber: session.orderNumber?.trim() || undefined,
       notes: session.notes?.trim() || undefined,
       participants: session.participants,
       updatedAt: new Date().toISOString(),
-    };
+    });
 
-    const currentDraft = draftAudits.find((draft) => draft.id === nextDraft.id);
     if (currentDraft) {
       const currentComparable = JSON.stringify({
         id: currentDraft.id,
