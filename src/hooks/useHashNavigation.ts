@@ -1,21 +1,19 @@
 import { useCallback, useEffect, useRef } from "react";
 import { Role } from "../types";
 
-type AuditView = "dashboard" | "home" | "setup" | "audit" | "history" | "reports";
-type ReportsPanel = "kpis" | "structure" | "integrations";
-
 interface UseHashNavigationParams {
-  view: AuditView;
-  reportsPanel: ReportsPanel;
+  view: string;
   selectedRole: Role | null;
-  setView: (view: AuditView) => void;
-  setReportsPanel: (panel: ReportsPanel) => void;
+  setView: (view: any) => void;
   clearSelectedRole: () => void;
 }
 
-export function useHashNavigation({ view, reportsPanel, selectedRole, setView, setReportsPanel, clearSelectedRole }: UseHashNavigationParams) {
+export function useHashNavigation({ view, selectedRole, setView, clearSelectedRole }: UseHashNavigationParams) {
   const isApplyingHashRef = useRef(false);
   const initialHashRef = useRef<string | null>(null);
+  const previousEntryRef = useRef<{ view: string } | null>(null);
+  const navigationHistoryRef = useRef<Array<{ view: string }>>([]);
+  const isGoingBackRef = useRef(false);
 
   const applyNavigationFromHash = useCallback(() => {
     if (typeof window === "undefined") {
@@ -23,7 +21,7 @@ export function useHashNavigation({ view, reportsPanel, selectedRole, setView, s
     }
 
     const rawHash = window.location.hash.replace(/^#\/?/, "").trim();
-    const [section, subsection] = rawHash.split("/");
+    const [section] = rawHash.split("/");
 
     isApplyingHashRef.current = true;
 
@@ -47,24 +45,23 @@ export function useHashNavigation({ view, reportsPanel, selectedRole, setView, s
       return;
     }
 
+    if (section === "estructura" || section === "structure") {
+      setView("structure");
+      return;
+    }
+
+    if (section === "integraciones" || section === "integrations") {
+      setView("integrations");
+      return;
+    }
+
     if (section === "home") {
       setView("home");
       return;
     }
 
-    if (section === "reports" || section === "control") {
-      const nextPanel = subsection === "estructura"
-        ? "structure"
-        : subsection === "integraciones"
-          ? "integrations"
-          : "kpis";
-      setReportsPanel(nextPanel);
-      setView("reports");
-      return;
-    }
-
     setView("dashboard");
-  }, [setReportsPanel, setView]);
+  }, [setView]);
 
   const buildHashForView = useCallback(() => {
     if (view === "setup") {
@@ -79,25 +76,65 @@ export function useHashNavigation({ view, reportsPanel, selectedRole, setView, s
       return "#/historial";
     }
 
+    if (view === "structure") {
+      return "#/estructura";
+    }
+
+    if (view === "integrations") {
+      return "#/integraciones";
+    }
+
     if (view === "home") {
       return "#/home";
     }
 
-    if (view === "reports") {
-      const panelSlug = reportsPanel === "structure" ? "estructura" : reportsPanel === "integrations" ? "integraciones" : "indicadores";
-      return `#/control/${panelSlug}`;
-    }
-
     return "#/inicio";
-  }, [reportsPanel, view]);
+  }, [view]);
 
   if (initialHashRef.current === null) {
     initialHashRef.current = buildHashForView();
   }
 
+  useEffect(() => {
+    const currentEntry = { view };
+    const previousEntry = previousEntryRef.current;
+
+    if (!previousEntry) {
+      previousEntryRef.current = currentEntry;
+      return;
+    }
+
+    if (isApplyingHashRef.current) {
+      previousEntryRef.current = currentEntry;
+      return;
+    }
+
+    const hasChanged = previousEntry.view !== currentEntry.view;
+
+    if (!hasChanged) {
+      return;
+    }
+
+    if (isGoingBackRef.current) {
+      isGoingBackRef.current = false;
+      previousEntryRef.current = currentEntry;
+      return;
+    }
+
+    navigationHistoryRef.current.push(previousEntry);
+    previousEntryRef.current = currentEntry;
+  }, [view]);
+
   const handleTopbarBack = useCallback(() => {
     if (view === "audit" && selectedRole) {
       clearSelectedRole();
+      return;
+    }
+
+    const previousEntry = navigationHistoryRef.current.pop();
+    if (previousEntry) {
+      isGoingBackRef.current = true;
+      setView(previousEntry.view);
       return;
     }
 
@@ -106,7 +143,7 @@ export function useHashNavigation({ view, reportsPanel, selectedRole, setView, s
       return;
     }
 
-    if (view === "setup" || view === "history" || view === "reports" || view === "home") {
+    if (view === "setup" || view === "history" || view === "home" || view === "structure" || view === "integrations") {
       setView("dashboard");
     }
   }, [clearSelectedRole, selectedRole, setView, view]);

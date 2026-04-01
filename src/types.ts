@@ -101,6 +101,7 @@ export interface AuditSession {
   items: AuditItem[];
   totalScore: number;
   orderNumber?: string;
+  auditedFileNames?: string[];
   notes?: string;
   participants?: Partial<OrAuditParticipants>;
   roleScores?: AuditRoleScore[];

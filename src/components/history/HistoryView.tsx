@@ -187,9 +187,15 @@ export function HistoryView({
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
-                    <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Personal</p><p className="mt-2 text-sm font-black text-slate-900">{selectedHistoryAudit.staffName || "N/A"}</p></div>
+                    {selectedHistoryAudit.role !== "Pre Entrega" && <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Personal</p><p className="mt-2 text-sm font-black text-slate-900">{selectedHistoryAudit.staffName || "N/A"}</p></div>}
                     <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Ubicación</p><p className="mt-2 text-sm font-black text-slate-900">{selectedHistoryAudit.location}</p></div>
                     {selectedHistoryAudit.orderNumber && <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4 col-span-2"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Orden</p><p className="mt-2 text-sm font-black text-blue-600">{selectedHistoryAudit.orderNumber}</p></div>}
+                    {selectedHistoryAudit.auditedFileNames?.some((name) => name?.trim()) && (
+                      <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4 col-span-2">
+                        <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Legajos auditados</p>
+                        <p className="mt-2 text-sm font-black text-slate-900">{selectedHistoryAudit.auditedFileNames.filter((name) => name?.trim()).join(" · ")}</p>
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">

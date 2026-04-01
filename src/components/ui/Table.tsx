@@ -2,7 +2,7 @@ import React from "react";
 import { cn } from "../../lib/utils";
 
 export function Table({ className, ...props }: React.TableHTMLAttributes<HTMLTableElement>) {
-  return <table className={cn("w-full border-separate border-spacing-0", className)} {...props} />;
+  return <table className={cn("w-full border-separate border-spacing-0 overflow-hidden", className)} {...props} />;
 }
 
 export function TableHead({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
@@ -18,9 +18,9 @@ export function TableRow({ className, ...props }: React.HTMLAttributes<HTMLTable
 }
 
 export function TableHeader({ className, ...props }: React.ThHTMLAttributes<HTMLTableCellElement>) {
-  return <th className={cn("border-b border-slate-100 px-4 py-3 text-left text-[10px] font-black uppercase tracking-[0.18em] text-slate-400", className)} {...props} />;
+  return <th className={cn("border-b border-blue-100 px-4 py-3 text-left text-[10px] font-black uppercase tracking-[0.18em] text-slate-500 bg-blue-50/40", className)} {...props} />;
 }
 
 export function TableCell({ className, ...props }: React.TdHTMLAttributes<HTMLTableCellElement>) {
-  return <td className={cn("border-b border-slate-100 px-4 py-4 text-sm font-medium text-slate-600", className)} {...props} />;
+  return <td className={cn("border-b border-slate-100/90 px-4 py-4 text-sm font-medium text-slate-600", className)} {...props} />;
 }

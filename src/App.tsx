@@ -8,7 +8,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from "react";
+import React, { Suspense, useState, useEffect } from "react";
 import { 
   ClipboardCheck, 
   MapPin, 
@@ -30,7 +30,6 @@ import {
   ClipboardList,
   ChevronDown,
   FileText,
-  BarChart3,
   Settings,
   LayoutDashboard,
   AlertCircle,
@@ -39,15 +38,15 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { cn, createClientId } from "./lib/utils";
 import { buildAuditSyncPayload, sendAuditToWebhook } from "./services/audit-sync";
-import { generateAuditPdfReport } from "./services/audit-report-pdf";
 import { 
   LOCATIONS, 
   AUDITORS,
   OR_PARTICIPANTS,
   OR_ROLE_LABELS
 } from "./constants";
-import { AuditSession, AuditTemplateItem, Location, OrResponsibleRole, Role } from "./types";
+import { AuditSession, AuditTemplateItem, AuditUserProfile, Location, OrResponsibleRole, Role } from "./types";
 import { buildOrderAuditItems, calculateAuditCompliance, calculateRoleScores } from "./services/or-audit";
+import { PRE_DELIVERY_DOCUMENTARY_BLOCK, buildPreDeliveryAuditItems, buildPreDeliveryTemplateItems } from "./services/pre-delivery-audit";
 import { auth, googleProvider, isFirebaseConfigured } from "./firebase";
 import { 
   signInWithPopup, 
@@ -57,19 +56,19 @@ import {
 } from "firebase/auth";
 import Papa from "papaparse";
 import { AuditItemRow } from "./components/audit/AuditItemRow";
+import { LoginView } from "./components/views/LoginView";
 import { Sidebar } from "./components/layout/Sidebar";
 import { Topbar } from "./components/layout/Topbar";
-import { HistoryView } from "./components/history/HistoryView";
-import { StructurePanel } from "./components/reports/StructurePanel";
-import { ControlKpisPanel } from "./components/reports/ControlKpisPanel";
-import { DashboardView } from "./components/views/DashboardView";
 import { Button } from "./components/ui/Button";
 import { AppModal } from "./components/ui/Modal";
-import { useDashboardMetrics } from "./hooks/useDashboardMetrics";
 import { useAuditDrafts } from "./hooks/useAuditDrafts";
 import { useHashNavigation } from "./hooks/useHashNavigation";
 import { useAuditStructure } from "./hooks/useAuditStructure";
 import { useAuditSync } from "./hooks/useAuditSync";
+
+const DashboardView = React.lazy(() => import("./components/views/DashboardView").then((module) => ({ default: module.DashboardView })));
+const HistoryView = React.lazy(() => import("./components/history/HistoryView").then((module) => ({ default: module.HistoryView })));
+const StructurePanel = React.lazy(() => import("./components/reports/StructurePanel").then((module) => ({ default: module.StructurePanel })));
 
 function ErrorBoundary({ children }: { children: React.ReactNode }) {
   const [error, setError] = React.useState<any>(null);
@@ -129,6 +128,23 @@ function buildAuditBatchName(
   return `Auditoria de procesos - ${location} - ${formatMonthLabel(resolvedDate)} (${nextIndex})`;
 }
 
+function createEmptyAuditedFileNames() {
+  return Array.from({ length: 6 }, () => "");
+}
+
+const QUICK_AUDIT_MODE_STORAGE_KEY = "quick-audit-mode";
+const USER_PROFILE_STORAGE_KEY = "audit-user-profile";
+
+const DEFAULT_OBSERVATION_SUGGESTIONS = [
+  "Falta firma",
+  "Falta sello",
+  "Documento incompleto",
+  "No coincide con la unidad",
+  "No aplica por operación",
+];
+
+type OrdersSubmitMode = "continue" | "finish";
+
 function AuditApp() {
   const appTitle = import.meta.env.VITE_APP_TITLE?.trim() || "Auditoría OR Postventa VW";
   const contentContainerRef = React.useRef<HTMLDivElement | null>(null);
@@ -136,7 +152,7 @@ function AuditApp() {
   const envSheetCsvUrl = import.meta.env.VITE_SHEET_CSV_URL?.trim() || "";
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [view, setView] = useState<"dashboard" | "home" | "setup" | "audit" | "history" | "reports">("dashboard");
+  const [view, setView] = useState<"dashboard" | "home" | "setup" | "audit" | "history" | "structure" | "integrations">("dashboard");
   const [isSyncing, setIsSyncing] = useState(false);
   const [session, setSession] = useState<Partial<AuditSession>>({
     date: new Date().toISOString().split("T")[0],
@@ -146,23 +162,35 @@ function AuditApp() {
   const [selectedStaff, setSelectedStaff] = useState<string>("");
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedAudit, setSelectedAudit] = useState<AuditSession | null>(null);
-  const [reportsPanel, setReportsPanel] = useState<"kpis" | "structure" | "integrations">("kpis");
   const [historyPanel, setHistoryPanel] = useState<"records" | "exports">("records");
   const [webhookUrl, setWebhookUrl] = useState<string>(localStorage.getItem("webhookUrl") || envWebhookUrl);
   const [sheetCsvUrl, setSheetCsvUrl] = useState<string>(localStorage.getItem("sheetCsvUrl") || envSheetCsvUrl);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [isSendingToSheet, setIsSendingToSheet] = useState(false);
-  const [isDashboardUnlocked, setIsDashboardUnlocked] = useState<boolean>(() => {
-    if (typeof window === "undefined") {
-      return false;
-    }
-
-    return window.sessionStorage.getItem("dashboardUnlocked") === "1";
-  });
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [focusedAuditItemId, setFocusedAuditItemId] = useState<string | null>(null);
+  const [activeAuditItemId, setActiveAuditItemId] = useState<string | null>(null);
   const [completedAuditReports, setCompletedAuditReports] = useState<CompletedAuditReport[]>([]);
   const [showBatchReportModal, setShowBatchReportModal] = useState(false);
+  const [preDeliverySection, setPreDeliverySection] = useState<"general" | "legajos">("general");
+  const [preDeliveryActiveLegajoIndex, setPreDeliveryActiveLegajoIndex] = useState(0);
+  const [draftSaveState, setDraftSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const [isQuickAuditMode, setIsQuickAuditMode] = useState<boolean>(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+
+    return window.localStorage.getItem(QUICK_AUDIT_MODE_STORAGE_KEY) !== "0";
+  });
+  const [userProfile, setUserProfile] = useState<AuditUserProfile>(() => {
+    if (typeof window === "undefined") {
+      return "auditor";
+    }
+
+    const storedProfile = window.localStorage.getItem(USER_PROFILE_STORAGE_KEY);
+    return storedProfile === "supervisor" || storedProfile === "consulta" ? storedProfile : "auditor";
+  });
+  const [isSessionStarted, setIsSessionStarted] = useState(false);
   const isFirebaseEnabled = isFirebaseConfigured && Boolean(auth) && Boolean(googleProvider);
 
   const formatAuditMonthLabel = React.useCallback((dateValue?: string) => {
@@ -204,6 +232,7 @@ function AuditApp() {
     webhookUrl,
     hasSheetCsvUrl,
   });
+
   const {
     selectedStructureScope,
     setSelectedStructureScope,
@@ -215,11 +244,6 @@ function AuditApp() {
     isLoadingStructureFromCloud,
     isSavingStructureToCloud,
     structureStorageLabel,
-    reportFilter,
-    setReportFilter,
-    reportCategoryItems,
-    allStaffOptions,
-    configuredCategoryCount,
     newCategoryName,
     setNewCategoryName,
     newCategoryDescription,
@@ -267,6 +291,7 @@ function AuditApp() {
     setSelectedStaff,
     sessionLocation: session.location,
   });
+
   const getQuestionOrder = (text: string) => {
     const match = text.trim().match(/^(\d+)/);
     return match ? Number.parseInt(match[1], 10) : Number.POSITIVE_INFINITY;
@@ -281,9 +306,119 @@ function AuditApp() {
     return left.text.localeCompare(right.text);
   });
   const isOrdersAudit = selectedRole === "Ordenes";
+  const isPreDeliveryAudit = selectedRole === "Pre Entrega";
+  const auditedFileNames = Array.from({ length: 6 }, (_, index) => session.auditedFileNames?.[index] ?? "");
+  const trimmedAuditedFileNames = auditedFileNames.map((name) => name.trim());
+  const preDeliveryAuditItems = isPreDeliveryAudit
+    ? buildPreDeliveryTemplateItems(selectedAuditItems, auditedFileNames)
+    : [];
+  const displayedAuditItems = isPreDeliveryAudit ? preDeliveryAuditItems : selectedAuditItems;
   const sessionOrderItems = isOrdersAudit
     ? buildOrderAuditItems(selectedAuditItems, sessionItems, selectedRole || "Ordenes")
     : sessionItems;
+  const sessionPreDeliveryItems = isPreDeliveryAudit
+    ? buildPreDeliveryAuditItems(selectedAuditItems, sessionItems, auditedFileNames, selectedRole || "Pre Entrega")
+    : sessionItems;
+  const preDeliveryGeneralItems = isPreDeliveryAudit
+    ? displayedAuditItems.filter((item) => !(item.block || "").startsWith("Legajo auditado "))
+    : [];
+  const preDeliveryLegajoSections = isPreDeliveryAudit
+    ? Array.from(
+        displayedAuditItems
+          .filter((item) => (item.block || "").startsWith("Legajo auditado "))
+          .reduce((acc, item) => {
+            const sectionTitle = item.block || "Legajo auditado";
+            const current = acc.get(sectionTitle) ?? [];
+            current.push(item);
+            acc.set(sectionTitle, current);
+            return acc;
+          }, new Map<string, AuditTemplateItem[]>())
+      )
+    : [];
+  const preDeliveryLegajoItems = isPreDeliveryAudit
+    ? preDeliveryLegajoSections.flatMap(([, sectionItems]) => sectionItems)
+    : [];
+  const activePreDeliveryLegajoName = trimmedAuditedFileNames[preDeliveryActiveLegajoIndex] ?? "";
+  const activePreDeliveryLegajoTitle = activePreDeliveryLegajoName
+    ? `Legajo auditado ${preDeliveryActiveLegajoIndex + 1}: ${activePreDeliveryLegajoName}`
+    : null;
+  const formatPreDeliveryLegajoQuestion = (question: string) => {
+    const separatorIndex = question.indexOf(" · ");
+    return separatorIndex >= 0 ? question.slice(separatorIndex + 3) : question;
+  };
+  const activePreDeliveryLegajoItems = isPreDeliveryAudit && activePreDeliveryLegajoTitle
+    ? displayedAuditItems.filter((item) => item.block === activePreDeliveryLegajoTitle)
+    : [];
+  const preDeliveryDocumentaryTemplateCount = selectedAuditItems.filter(
+    (item) => item.block === PRE_DELIVERY_DOCUMENTARY_BLOCK
+  ).length;
+  const preDeliveryLegajoCards = auditedFileNames.map((name, index) => {
+    const trimmedName = name.trim();
+    const blockTitle = trimmedName ? `Legajo auditado ${index + 1}: ${trimmedName}` : null;
+    const checklistItems = blockTitle
+      ? displayedAuditItems.filter((item) => item.block === blockTitle)
+      : [];
+    const answeredCount = checklistItems.filter(
+      (auditItem) => sessionItems.some((item) => (item.id === auditItem.id || item.question === auditItem.text) && item.status)
+    ).length;
+    const totalCount = checklistItems.length || preDeliveryDocumentaryTemplateCount;
+    const completionRatio = totalCount > 0 ? answeredCount / totalCount : 0;
+    const status = !trimmedName && answeredCount === 0
+      ? "empty"
+      : answeredCount > 0 && answeredCount >= totalCount
+        ? "complete"
+        : "in-progress";
+
+    return {
+      index,
+      name,
+      trimmedName,
+      checklistItems,
+      answeredCount,
+      totalCount,
+      completionRatio,
+      status,
+      isActive: preDeliveryActiveLegajoIndex === index,
+    };
+  });
+  const visibleAuditItems = isPreDeliveryAudit
+    ? preDeliverySection === "general"
+      ? preDeliveryGeneralItems
+      : activePreDeliveryLegajoItems
+    : displayedAuditItems;
+  const isAuditItemAnswered = React.useCallback((auditItem: AuditTemplateItem, items: AuditSession["items"] = sessionItems) => (
+    items.some((item) => (item.id === auditItem.id || item.question === auditItem.text) && item.status)
+  ), [sessionItems]);
+  const getAnsweredAuditItem = React.useCallback((auditItem: AuditTemplateItem, items: AuditSession["items"] = sessionItems) => (
+    items.find((item) => item.id === auditItem.id || item.question === auditItem.text)
+  ), [sessionItems]);
+  const findNextPendingAuditItem = React.useCallback((
+    items: AuditSession["items"],
+    candidates: AuditTemplateItem[],
+    currentQuestion?: string,
+  ) => {
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const currentIndex = currentQuestion
+      ? candidates.findIndex((auditItem) => auditItem.text === currentQuestion)
+      : -1;
+    const trailingItems = currentIndex >= 0 ? candidates.slice(currentIndex + 1) : candidates;
+    const nextTrailingPending = trailingItems.find((auditItem) => !isAuditItemAnswered(auditItem, items));
+
+    if (nextTrailingPending) {
+      return nextTrailingPending;
+    }
+
+    return candidates.find((auditItem) => !isAuditItemAnswered(auditItem, items)) ?? null;
+  }, [isAuditItemAnswered]);
+  const answeredGeneralCount = preDeliveryGeneralItems.filter(
+    (auditItem) => sessionItems.some((item) => (item.id === auditItem.id || item.question === auditItem.text) && item.status)
+  ).length;
+  const answeredLegajoCount = preDeliveryLegajoItems.filter(
+    (auditItem) => sessionItems.some((item) => (item.id === auditItem.id || item.question === auditItem.text) && item.status)
+  ).length;
   const selectedAuditStaffOptions = selectedAuditCategory?.staffOptions ?? [];
   const sessionParticipants = session.participants ?? {
     asesorServicio: "",
@@ -296,7 +431,8 @@ function AuditApp() {
     ? calculateAuditCompliance(sessionOrderItems)
     : {
         compliance: (() => {
-          const validItems = sessionItems.filter((item) => item.status !== "na");
+          const sourceItems = isPreDeliveryAudit ? sessionPreDeliveryItems : sessionItems;
+          const validItems = sourceItems.filter((item) => item.status !== "na");
           if (validItems.length === 0) {
             return 0;
           }
@@ -306,27 +442,95 @@ function AuditApp() {
         })(),
         obtainedWeight: 0,
         totalApplicableWeight: 0,
-        itemsCount: sessionItems.length,
+        itemsCount: isPreDeliveryAudit ? sessionPreDeliveryItems.length : sessionItems.length,
       };
   const currentOrRoleScores = isOrdersAudit ? calculateRoleScores(sessionOrderItems) : [];
+  const activeAuditItem = visibleAuditItems.find((auditItem) => auditItem.id === activeAuditItemId) ?? null;
+  const activeAuditSessionItem = activeAuditItem ? getAnsweredAuditItem(activeAuditItem) : undefined;
+  const activeAuditItemIndex = activeAuditItem ? visibleAuditItems.findIndex((auditItem) => auditItem.id === activeAuditItem.id) : -1;
+  const draftSaveStateLabel = draftSaveState === "saving"
+    ? "Guardando borrador..."
+    : draftSaveState === "saved"
+      ? "Borrador guardado"
+      : "Borrador listo";
+  const observationSuggestions = isPreDeliveryAudit && preDeliverySection === "legajos"
+    ? DEFAULT_OBSERVATION_SUGGESTIONS
+    : selectedRole === "Lavadero"
+      ? [
+          "Falta limpieza",
+          "Detalle incompleto",
+          "No coincide con estándar",
+          "Elemento ausente",
+          "Pendiente de corregir",
+        ]
+      : DEFAULT_OBSERVATION_SUGGESTIONS;
+  const getLastAuditItemStorageKey = React.useCallback((sessionId?: string) => {
+    if (!sessionId) {
+      return null;
+    }
+
+    return `audit-last-item:${sessionId}`;
+  }, []);
+  const resumeTargetAuditItem = React.useMemo(() => {
+    const fallbackItem = findNextPendingAuditItem(sessionItems, visibleAuditItems) ?? visibleAuditItems[0] ?? null;
+    const storageKey = getLastAuditItemStorageKey(session.id);
+
+    if (typeof window === "undefined" || !storageKey) {
+      return fallbackItem;
+    }
+
+    const storedId = window.sessionStorage.getItem(storageKey) || window.localStorage.getItem(storageKey);
+    if (!storedId) {
+      return fallbackItem;
+    }
+
+    return visibleAuditItems.find((auditItem) => auditItem.id === storedId) ?? fallbackItem;
+  }, [findNextPendingAuditItem, getLastAuditItemStorageKey, session.id, sessionItems, visibleAuditItems]);
+  const nextPendingLegajoIndex = React.useMemo(() => {
+    if (!isPreDeliveryAudit || preDeliverySection !== "legajos" || preDeliveryLegajoCards.length === 0) {
+      return null;
+    }
+
+    for (let offset = 1; offset <= preDeliveryLegajoCards.length; offset += 1) {
+      const nextIndex = (preDeliveryActiveLegajoIndex + offset) % preDeliveryLegajoCards.length;
+      const legajoCard = preDeliveryLegajoCards[nextIndex];
+      if (!legajoCard || legajoCard.status === "complete") {
+        continue;
+      }
+
+      return nextIndex;
+    }
+
+    return null;
+  }, [isPreDeliveryAudit, preDeliveryActiveLegajoIndex, preDeliveryLegajoCards, preDeliverySection]);
+  const currentLegajoCompleted = isPreDeliveryAudit
+    && preDeliverySection === "legajos"
+    && activePreDeliveryLegajoItems.length > 0
+    && activePreDeliveryLegajoItems.every((auditItem) => isAuditItemAnswered(auditItem));
   const ORDERS_TARGET_PER_ADVISOR = 10;
-  const ORDERS_TARGET_ADVISORS = 2;
-  const currentAuditBatchName = session.auditBatchName?.trim() || (session.location
-    ? buildAuditBatchName(
-        session.location,
-        session.date,
-        history
-          .filter((auditSession) => auditSession.location === session.location && auditSession.date.startsWith((session.date || "").slice(0, 7)) && auditSession.auditBatchName?.trim())
-          .map((auditSession) => auditSession.auditBatchName!.trim()),
-        formatAuditMonthLabel,
-      )
-    : "");
+  const ORDERS_TARGET_ADVISORS = Math.max(OR_PARTICIPANTS.asesorServicio.length, 1);
+  const currentAuditBatchName = session.auditBatchName?.trim() || "";
   const sampledOrdersHistory = Array.from(
     [...history, ...completedAuditReports.map((report) => report.session)]
-      .filter((auditSession) => auditSession.entityType === "or" && auditSession.auditBatchName?.trim() === currentAuditBatchName)
+      .filter((auditSession) => {
+        if (!currentAuditBatchName) {
+          return false;
+        }
+
+        const isOrdersSession = auditSession.entityType === "or"
+          || auditSession.role === "Ordenes"
+          || Boolean(auditSession.orderNumber?.trim());
+        if (!isOrdersSession) {
+          return false;
+        }
+
+        return auditSession.auditBatchName?.trim() === currentAuditBatchName;
+      })
       .reduce((acc, auditSession) => {
-        if (!acc.has(auditSession.id)) {
-          acc.set(auditSession.id, auditSession);
+        const fallbackId = `${auditSession.role || "sin-rol"}-${auditSession.date || "sin-fecha"}-${auditSession.orderNumber || "sin-or"}-${auditSession.participants?.asesorServicio || auditSession.staffName || "sin-asesor"}`;
+        const sessionId = auditSession.id || fallbackId;
+        if (!acc.has(sessionId)) {
+          acc.set(sessionId, auditSession);
         }
         return acc;
       }, new Map<string, AuditSession>())
@@ -341,6 +545,26 @@ function AuditApp() {
     acc.set(advisorName, (acc.get(advisorName) ?? 0) + 1);
     return acc;
   }, new Map<string, number>());
+  const configuredAdvisorNames = OR_PARTICIPANTS.asesorServicio;
+  const sampledOrdersAdvisorProgress = [
+    ...configuredAdvisorNames.map((advisorName) => ({
+      advisorName,
+      sampledCount: sampledOrdersByAdvisor.get(advisorName) ?? 0,
+    })),
+    ...Array.from(sampledOrdersByAdvisor.entries())
+      .filter(([advisorName]) => !configuredAdvisorNames.includes(advisorName as typeof configuredAdvisorNames[number]))
+      .map(([advisorName, sampledCount]) => ({ advisorName, sampledCount })),
+  ].sort((left, right) => {
+    const completionDelta = (right.sampledCount >= ORDERS_TARGET_PER_ADVISOR ? 1 : 0) - (left.sampledCount >= ORDERS_TARGET_PER_ADVISOR ? 1 : 0);
+    if (completionDelta !== 0) {
+      return completionDelta;
+    }
+
+    return right.sampledCount - left.sampledCount;
+  });
+  const completedOrdersAdvisorsCount = sampledOrdersAdvisorProgress.filter(
+    (advisorProgress) => advisorProgress.sampledCount >= ORDERS_TARGET_PER_ADVISOR
+  ).length;
   const sampledOrdersProgress = Math.round(
     (Array.from(sampledOrdersByAdvisor.values())
       .sort((left, right) => right - left)
@@ -349,20 +573,6 @@ function AuditApp() {
       / (ORDERS_TARGET_PER_ADVISOR * ORDERS_TARGET_ADVISORS || 1))
       * 100
   );
-  const {
-    rankingPanels,
-    recentMonthlyDashboardData,
-    recentAudits,
-    currentMonthDashboard,
-    monthlyCriticalAudits,
-    currentMonthRoleData,
-    currentMonthStaffData,
-    currentMonthRoleDistributionData,
-    currentMonthUniqueRoles,
-    currentMonthUniqueStaff,
-    dashboardDateLabel,
-    dashboardAlerts,
-  } = useDashboardMetrics(history);
   const selectedAuditorOption = AUDITORS.find((auditor) => auditor.id === session.auditorId) ?? null;
   const auditBatchDisplayName = session.auditBatchName?.trim() || (session.location
     ? buildAuditBatchName(
@@ -374,48 +584,27 @@ function AuditApp() {
         formatAuditMonthLabel,
       )
     : "");
-  const optionalPendingCount = selectedAuditItems.filter(
-    (auditItem) => !sessionItems.some((item) => item.question === auditItem.text && item.status)
+  const optionalPendingCount = displayedAuditItems.filter(
+    (auditItem) => !sessionItems.some((item) => (item.id === auditItem.id || item.question === auditItem.text) && item.status)
   ).length;
-  const failItemsWithoutCommentCount = selectedAuditItems.filter((auditItem) => {
+  const failItemsWithoutCommentCount = displayedAuditItems.filter((auditItem) => {
     if (!auditItem.requiresCommentOnFail) {
       return false;
     }
 
-    const answeredItem = sessionItems.find((item) => item.question === auditItem.text);
+    const answeredItem = sessionItems.find((item) => item.id === auditItem.id || item.question === auditItem.text);
     return answeredItem?.status === "fail" && !answeredItem.comment?.trim();
   }).length;
-  const controlPanels: Array<{
-    id: "kpis" | "structure" | "integrations";
-    label: string;
-    description: string;
-    icon: typeof BarChart3;
-  }> = [
-    {
-      id: "kpis",
-      label: "Indicadores",
-      description: "Seguimiento mensual, matriz y tendencias.",
-      icon: BarChart3,
-    },
-    {
-      id: "structure",
-      label: "Estructura",
-      description: "Categorías, personal auditable e ítems.",
-      icon: Settings,
-    },
-    {
-      id: "integrations",
-      label: "Integraciones",
-      description: "Apps Script, Sheets y parámetros externos.",
-      icon: ShieldCheck,
-    },
-  ];
-  const activeControlPanel = controlPanels.find((panel) => panel.id === reportsPanel) ?? controlPanels[0];
+  const isSubmitDisabled = sessionItems.length === 0 || isSendingToSheet || failItemsWithoutCommentCount > 0;
+  const canRunAudits = userProfile !== "consulta";
+  const canAccessStructure = userProfile === "supervisor";
+  const canAccessIntegrations = userProfile === "supervisor";
   const sidebarItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "home", label: "Nueva Auditoría", icon: Plus },
+    ...(canRunAudits ? [{ id: "home", label: "Nueva Auditoría", icon: Plus }] : []),
     { id: "history", label: "Historial", icon: History },
-    { id: "reports", label: "Control", icon: BarChart3 },
+    ...(canAccessStructure ? [{ id: "structure", label: "Estructura", icon: Settings }] : []),
+    ...(canAccessIntegrations ? [{ id: "integrations", label: "Integraciones", icon: ShieldCheck }] : []),
   ];
   const filteredHistory = history.filter((item) =>
     item.staffName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -423,11 +612,7 @@ function AuditApp() {
     item.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
     item.items[0]?.category.toLowerCase().includes(searchTerm.toLowerCase())
   );
-  const filteredReportSessions = history.filter((sessionItem) =>
-    sessionItem.role === reportFilter.role &&
-    (!reportFilter.staff || sessionItem.staffName === reportFilter.staff) &&
-    sessionItem.date.startsWith(reportFilter.month)
-  );
+  const recentAudits = history.slice(0, 3);
   const selectedHistoryAudit = view === "history" ? selectedAudit : null;
   const historyAverageScore = Math.round(filteredHistory.reduce((acc, item) => acc + item.totalScore, 0) / (filteredHistory.length || 1));
   const nonCompliantAudits = filteredHistory.filter((item) => item.totalScore < 90).length;
@@ -443,6 +628,7 @@ function AuditApp() {
     role?: Role;
     items: AuditSession["items"];
     orderNumber?: string;
+    auditedFileNames?: string[];
     notes?: string;
     participants?: AuditSession["participants"];
   }) => {
@@ -453,10 +639,13 @@ function AuditApp() {
       auditorId: draft.auditorId,
       location: draft.location,
       orderNumber: draft.orderNumber,
+      auditedFileNames: draft.auditedFileNames,
       notes: draft.notes,
       participants: draft.participants,
       items: draft.items ?? [],
     });
+    setActiveAuditItemId(null);
+    setFocusedAuditItemId(null);
     setSelectedRole(draft.role ?? null);
     setSelectedStaff(draft.staffName ?? "");
     setView(draft.role ? "audit" : "setup");
@@ -465,7 +654,6 @@ function AuditApp() {
   const {
     sortedDraftAudits,
     removeDraftAudit,
-    resumeDraftAudit,
   } = useAuditDrafts({
     selectedRole,
     selectedStaff,
@@ -507,10 +695,8 @@ function AuditApp() {
 
   const { handleTopbarBack } = useHashNavigation({
     view,
-    reportsPanel,
     selectedRole,
     setView,
-    setReportsPanel,
     clearSelectedRole,
   });
 
@@ -559,7 +745,7 @@ function AuditApp() {
         return;
       }
 
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 180);
 
     const clearId = window.setTimeout(() => setFocusedAuditItemId(null), 2600);
@@ -572,7 +758,77 @@ function AuditApp() {
 
   useEffect(() => {
     setIsMobileNavOpen(false);
-  }, [view, reportsPanel]);
+  }, [view]);
+
+  useEffect(() => {
+    if (!isPreDeliveryAudit) {
+      setPreDeliverySection("general");
+      setPreDeliveryActiveLegajoIndex(0);
+    }
+  }, [isPreDeliveryAudit]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(QUICK_AUDIT_MODE_STORAGE_KEY, isQuickAuditMode ? "1" : "0");
+  }, [isQuickAuditMode]);
+
+  useEffect(() => {
+    const storageKey = getLastAuditItemStorageKey(session.id);
+    if (typeof window === "undefined" || !storageKey || !activeAuditItemId) {
+      return;
+    }
+
+    window.sessionStorage.setItem(storageKey, activeAuditItemId);
+    window.localStorage.setItem(storageKey, activeAuditItemId);
+  }, [activeAuditItemId, getLastAuditItemStorageKey, session.id]);
+
+  useEffect(() => {
+    if (view !== "audit" || visibleAuditItems.length === 0) {
+      return;
+    }
+
+    if (activeAuditItemId && visibleAuditItems.some((auditItem) => auditItem.id === activeAuditItemId)) {
+      return;
+    }
+
+    const nextActiveItem = resumeTargetAuditItem ?? visibleAuditItems[0] ?? null;
+    if (nextActiveItem) {
+      setActiveAuditItemId(nextActiveItem.id);
+    }
+  }, [activeAuditItemId, resumeTargetAuditItem, view, visibleAuditItems]);
+
+  useEffect(() => {
+    if (view !== "setup" && view !== "audit") {
+      setDraftSaveState("idle");
+      return;
+    }
+
+    if (!session.id) {
+      return;
+    }
+
+    setDraftSaveState("saving");
+    const timeoutId = window.setTimeout(() => setDraftSaveState("saved"), 420);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [selectedRole, selectedStaff, session, sessionItems, view]);
+
+  useEffect(() => {
+    if (!isPreDeliveryAudit || preDeliverySection !== "legajos") {
+      return;
+    }
+
+    if (preDeliveryActiveLegajoIndex < auditedFileNames.length) {
+      return;
+    }
+
+    setPreDeliveryActiveLegajoIndex(0);
+  }, [auditedFileNames.length, isPreDeliveryAudit, preDeliveryActiveLegajoIndex, preDeliverySection]);
 
   useEffect(() => {
     if ((view === "setup" || view === "audit") && (!session.id || (session.location && !session.auditBatchName))) {
@@ -582,15 +838,38 @@ function AuditApp() {
 
   useEffect(() => {
     contentContainerRef.current?.scrollTo({ top: 0, behavior: "auto" });
-  }, [view, reportsPanel, selectedRole]);
+  }, [view, selectedRole]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
 
-    window.sessionStorage.setItem("dashboardUnlocked", isDashboardUnlocked ? "1" : "0");
-  }, [isDashboardUnlocked]);
+    window.localStorage.setItem(USER_PROFILE_STORAGE_KEY, userProfile);
+  }, [userProfile]);
+
+  useEffect(() => {
+    if (canRunAudits) {
+      return;
+    }
+
+    if (view === "setup" || view === "audit" || view === "home" || view === "structure" || view === "integrations") {
+      setView("dashboard");
+      return;
+    }
+  }, [canRunAudits, view]);
+
+  useEffect(() => {
+    if (!canAccessStructure && view === "structure") {
+      setView("dashboard");
+    }
+  }, [canAccessStructure, view]);
+
+  useEffect(() => {
+    if (!canAccessIntegrations && view === "integrations") {
+      setView("dashboard");
+    }
+  }, [canAccessIntegrations, view]);
 
   useEffect(() => {
     if (view !== "history") {
@@ -612,7 +891,7 @@ function AuditApp() {
   const saveIntegrationSettings = () => {
     localStorage.setItem("webhookUrl", webhookUrl.trim());
     localStorage.setItem("sheetCsvUrl", sheetCsvUrl.trim());
-    alert("Configuración guardada correctamente.");
+    alert("Configuracion guardada correctamente.");
   };
 
   const exportToCSV = () => {
@@ -661,9 +940,17 @@ function AuditApp() {
     return () => unsubscribe();
   }, [isFirebaseEnabled]);
 
+  const handleSelectProfile = (profile: AuditUserProfile) => {
+    setUserProfile(profile);
+    window.localStorage.setItem(USER_PROFILE_STORAGE_KEY, profile);
+    if (profile === "consulta") {
+      setView("dashboard");
+    }
+    setIsSessionStarted(true);
+  };
+
   const handleLogin = async () => {
     if (!auth || !googleProvider || !isFirebaseEnabled) {
-      alert("Firebase está desactivado en este entorno. La app funciona en modo Google Sheets y almacenamiento local.");
       return;
     }
 
@@ -698,26 +985,33 @@ function AuditApp() {
   const handleLogout = async () => {
     if (!auth || !isFirebaseEnabled) {
       setUser(null);
-      setView("dashboard");
-      return;
+    } else {
+      try {
+        await signOut(auth);
+      } catch (error) {
+        console.error("Logout failed:", error);
+      }
     }
-
-    try {
-      await signOut(auth);
-      setView("dashboard");
-    } catch (error) {
-      console.error("Logout failed:", error);
-    }
+    setIsSessionStarted(false);
+    setView("dashboard");
   };
 
   const startNewAudit = () => {
+    if (!canRunAudits) {
+      alert("El perfil Consulta no puede iniciar ni editar auditorías.");
+      return;
+    }
+
     setCompletedAuditReports([]);
     setShowBatchReportModal(false);
     setSelectedAudit(null);
+    setActiveAuditItemId(null);
+    setFocusedAuditItemId(null);
     setSession({
       id: createClientId(),
       date: new Date().toISOString().split("T")[0],
       auditBatchName: undefined,
+      auditedFileNames: createEmptyAuditedFileNames(),
       participants: {
         asesorServicio: "",
         tecnico: "",
@@ -733,6 +1027,11 @@ function AuditApp() {
   };
 
   const handleSetupSubmit = () => {
+    if (!canRunAudits) {
+      alert("El perfil Consulta no puede iniciar auditorías.");
+      return;
+    }
+
     if (session.auditorId && session.location) {
       setSession((current) => ensureSessionMetadata(current));
       setView("audit");
@@ -748,8 +1047,9 @@ function AuditApp() {
   };
 
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [pendingOrdersSubmitMode, setPendingOrdersSubmitMode] = useState<OrdersSubmitMode>("finish");
 
-  const handleAuditSubmit = () => {
+  const handleAuditSubmit = (submitMode: OrdersSubmitMode = "finish") => {
     if (!selectedRole || !selectedAuditCategory) return;
 
     if (selectedRole === "Ordenes" && !/^\d{6}$/.test(session.orderNumber?.trim() || "")) {
@@ -768,38 +1068,87 @@ function AuditApp() {
     }
     
     if (optionalPendingCount > 0) {
+      setPendingOrdersSubmitMode(submitMode);
       setShowConfirmModal(true);
       return;
     }
-    submitAudit();
+    submitAudit(submitMode);
   };
 
   const focusAuditItem = (auditItem: AuditTemplateItem) => {
+    setActiveAuditItemId(auditItem.id);
     setFocusedAuditItemId(auditItem.id);
   };
 
-  const submitAudit = async () => {
+  const goToNextPendingLegajo = React.useCallback(() => {
+    if (nextPendingLegajoIndex === null) {
+      return;
+    }
+
+    setPreDeliverySection("legajos");
+    setPreDeliveryActiveLegajoIndex(nextPendingLegajoIndex);
+
+    const nextLegajoCard = preDeliveryLegajoCards[nextPendingLegajoIndex];
+    if (!nextLegajoCard?.trimmedName) {
+      return;
+    }
+
+    const blockTitle = `Legajo auditado ${nextPendingLegajoIndex + 1}: ${nextLegajoCard.trimmedName}`;
+    const nextLegajoItems = displayedAuditItems.filter((item) => item.block === blockTitle);
+    const nextPendingItem = findNextPendingAuditItem(sessionItems, nextLegajoItems) ?? nextLegajoItems[0] ?? null;
+    if (nextPendingItem) {
+      focusAuditItem(nextPendingItem);
+    }
+  }, [displayedAuditItems, findNextPendingAuditItem, nextPendingLegajoIndex, preDeliveryLegajoCards, sessionItems]);
+
+  const submitAudit = async (submitMode: OrdersSubmitMode = "finish") => {
     if (sessionItems.length === 0) return;
 
     setIsSendingToSheet(true);
 
     const normalizedSession = ensureSessionMetadata(session);
 
-    const finalItems = isOrdersAudit ? sessionOrderItems : sessionItems;
+    const finalItems = isOrdersAudit
+      ? sessionOrderItems
+      : isPreDeliveryAudit
+        ? sessionPreDeliveryItems
+        : sessionItems;
     const complianceMetrics = calculateAuditCompliance(finalItems);
     const roleScores = isOrdersAudit ? calculateRoleScores(finalItems) : [];
 
     const completeSession: AuditSession = {
       ...normalizedSession as AuditSession,
-      staffName: selectedRole === "Ordenes" ? session.participants?.asesorServicio || selectedStaff : selectedStaff,
+      userProfile,
+      staffName: selectedRole === "Ordenes"
+        ? session.participants?.asesorServicio || selectedStaff
+        : isPreDeliveryAudit
+          ? undefined
+          : selectedStaff,
       role: selectedRole!,
       orderNumber: selectedRole === "Ordenes" ? session.orderNumber?.trim() || undefined : undefined,
+      auditedFileNames: isPreDeliveryAudit ? auditedFileNames.map((name) => name.trim()) : undefined,
       totalScore: complianceMetrics.compliance,
       items: finalItems,
       participants: session.participants,
       roleScores,
       entityType: selectedRole === "Ordenes" ? "or" : "general",
     };
+    const shouldKeepOrdersAdvisor = completeSession.role === "Ordenes" && submitMode === "continue";
+    const nextOrdersParticipants = shouldKeepOrdersAdvisor
+      ? {
+          asesorServicio: completeSession.participants?.asesorServicio?.trim() || "",
+          tecnico: "",
+          controller: "",
+          lavador: "",
+          repuestos: "",
+        }
+      : {
+          asesorServicio: "",
+          tecnico: "",
+          controller: "",
+          lavador: "",
+          repuestos: "",
+        };
 
     const auditorName = AUDITORS.find((auditor) => auditor.id === completeSession.auditorId)?.name || "N/A";
     let savedRemotely = false;
@@ -838,15 +1187,26 @@ function AuditApp() {
         upsertLocalAuditHistory(completeSession);
       }
 
-      setCompletedAuditReports((current) => [
-        {
+      setCompletedAuditReports((current) => {
+        const nextReport: CompletedAuditReport = {
           role: completeSession.role || selectedRole!,
           session: completeSession,
           auditorName,
-          templateItems: selectedAuditItems,
-        },
-        ...current.filter((report) => report.role !== (completeSession.role || selectedRole!)),
-      ]);
+          templateItems: displayedAuditItems,
+        };
+        const nextReports = [nextReport, ...current];
+        const seenReportIds = new Set<string>();
+
+        return nextReports.filter((report) => {
+          const reportId = report.session.id || `${report.role}-${report.session.date}-${report.session.orderNumber || "sin-or"}`;
+          if (seenReportIds.has(reportId)) {
+            return false;
+          }
+
+          seenReportIds.add(reportId);
+          return true;
+        });
+      });
 
       if (session.id) {
         removeDraftAudit(session.id);
@@ -854,7 +1214,6 @@ function AuditApp() {
 
       setShowConfirmModal(false);
       setIsSendingToSheet(false);
-      setSelectedRole(null);
       setSelectedStaff("");
       setView("audit");
       setSession({
@@ -863,15 +1222,14 @@ function AuditApp() {
         auditBatchName: completeSession.auditBatchName,
         auditorId: completeSession.auditorId,
         location: completeSession.location,
-        participants: isOrdersAudit ? {
-          asesorServicio: "",
-          tecnico: "",
-          controller: "",
-          lavador: "",
-          repuestos: "",
-        } : undefined,
+        auditedFileNames: createEmptyAuditedFileNames(),
+        participants: isOrdersAudit ? nextOrdersParticipants : undefined,
         items: [],
       });
+
+      if (!(completeSession.role === "Ordenes" && submitMode === "continue")) {
+        setSelectedRole(null);
+      }
 
       if (!savedRemotely) {
         alert("Auditoría guardada en este dispositivo.");
@@ -887,15 +1245,26 @@ function AuditApp() {
 
       upsertLocalAuditHistory(completeSession);
 
-      setCompletedAuditReports((current) => [
-        {
+      setCompletedAuditReports((current) => {
+        const nextReport: CompletedAuditReport = {
           role: completeSession.role || selectedRole!,
           session: completeSession,
           auditorName,
-          templateItems: selectedAuditItems,
-        },
-        ...current.filter((report) => report.role !== (completeSession.role || selectedRole!)),
-      ]);
+          templateItems: displayedAuditItems,
+        };
+        const nextReports = [nextReport, ...current];
+        const seenReportIds = new Set<string>();
+
+        return nextReports.filter((report) => {
+          const reportId = report.session.id || `${report.role}-${report.session.date}-${report.session.orderNumber || "sin-or"}`;
+          if (seenReportIds.has(reportId)) {
+            return false;
+          }
+
+          seenReportIds.add(reportId);
+          return true;
+        });
+      });
 
       if (session.id) {
         removeDraftAudit(session.id);
@@ -903,7 +1272,6 @@ function AuditApp() {
 
       setShowConfirmModal(false);
       setIsSendingToSheet(false);
-      setSelectedRole(null);
       setSelectedStaff("");
       setView("audit");
       setSession({
@@ -912,15 +1280,14 @@ function AuditApp() {
         auditBatchName: completeSession.auditBatchName,
         auditorId: completeSession.auditorId,
         location: completeSession.location,
-        participants: isOrdersAudit ? {
-          asesorServicio: "",
-          tecnico: "",
-          controller: "",
-          lavador: "",
-          repuestos: "",
-        } : undefined,
+        auditedFileNames: createEmptyAuditedFileNames(),
+        participants: isOrdersAudit ? nextOrdersParticipants : undefined,
         items: [],
       });
+
+      if (!(completeSession.role === "Ordenes" && submitMode === "continue")) {
+        setSelectedRole(null);
+      }
 
       if (isFirebaseEnabled && (errorMessage.includes("Missing or insufficient permissions") || errorMessage.includes("insufficient permissions"))) {
         const shouldLogin = window.confirm("Se guardó en este dispositivo. Firebase rechazó el acceso. ¿Querés iniciar sesión con Google ahora?");
@@ -950,8 +1317,7 @@ function AuditApp() {
   const toggleItemStatus = (question: string, status: "pass" | "fail" | "na") => {
     const existingIndex = session.items?.findIndex(i => i.question === question) ?? -1;
     const newItems = [...(session.items ?? [])];
-    const currentItemIndex = selectedAuditItems.findIndex((auditItem) => auditItem.text === question);
-    const templateItem = selectedAuditItems.find((auditItem) => auditItem.text === question);
+    const templateItem = displayedAuditItems.find((auditItem) => auditItem.text === question);
     
     if (existingIndex >= 0) {
       newItems[existingIndex] = { ...newItems[existingIndex], status };
@@ -972,7 +1338,11 @@ function AuditApp() {
     
     setSession({ ...session, items: newItems });
 
-    const nextItem = currentItemIndex >= 0 ? selectedAuditItems[currentItemIndex + 1] : null;
+    if (templateItem) {
+      setActiveAuditItemId(templateItem.id);
+    }
+
+    const nextItem = findNextPendingAuditItem(newItems, visibleAuditItems, question);
     if (nextItem) {
       focusAuditItem(nextItem);
     }
@@ -981,7 +1351,7 @@ function AuditApp() {
   const updateItemComment = (question: string, comment: string) => {
     const existingIndex = session.items?.findIndex(i => i.question === question) ?? -1;
     const newItems = [...(session.items ?? [])];
-    const templateItem = selectedAuditItems.find((auditItem) => auditItem.text === question);
+    const templateItem = displayedAuditItems.find((auditItem) => auditItem.text === question);
     
     if (existingIndex >= 0) {
       newItems[existingIndex] = { ...newItems[existingIndex], comment };
@@ -1006,7 +1376,7 @@ function AuditApp() {
   const updateItemPhoto = (question: string, photoUrl?: string) => {
     const existingIndex = session.items?.findIndex(i => i.question === question) ?? -1;
     const newItems = [...(session.items ?? [])];
-    const templateItem = selectedAuditItems.find((auditItem) => auditItem.text === question);
+    const templateItem = displayedAuditItems.find((auditItem) => auditItem.text === question);
 
     if (existingIndex >= 0) {
       newItems[existingIndex] = { ...newItems[existingIndex], photoUrl };
@@ -1082,9 +1452,22 @@ function AuditApp() {
 
   if (!isAuthReady) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-[#F5F7FA] via-[#EEF3F8] to-[#E6EDF6] flex items-center justify-center">
-        <div className="w-8 h-8 border-4 border-gray-200 border-t-[#1A1A1A] rounded-full animate-spin" />
+      <div className="min-h-screen bg-[#F5F7FA] flex items-center justify-center">
+        <div className="w-7 h-7 border-[3px] border-slate-200 border-t-blue-600 rounded-full animate-spin" />
       </div>
+    );
+  }
+
+  if (!isSessionStarted) {
+    return (
+      <LoginView
+        appTitle={appTitle}
+        isLoggingIn={isLoggingIn}
+        firebaseEnabled={isFirebaseEnabled}
+        user={user}
+        onSelectProfile={handleSelectProfile}
+        onLogin={handleLogin}
+      />
     );
   }
 
@@ -1092,9 +1475,8 @@ function AuditApp() {
     <div className="app-shell min-h-screen lg:flex">
       <Sidebar
         appTitle={appTitle}
-        show={(view === "dashboard" && isDashboardUnlocked) || view === "history" || view === "reports"}
+        show={view === "dashboard" || view === "history" || view === "structure" || view === "integrations"}
         view={view}
-        reportsPanel={reportsPanel}
         isMobileOpen={isMobileNavOpen}
         items={sidebarItems}
         user={user}
@@ -1104,15 +1486,7 @@ function AuditApp() {
             return;
           }
 
-          if (id === "reports") {
-            setReportsPanel("kpis");
-          }
-
           setView(id as typeof view);
-        }}
-        onReportsPanelChange={(panel) => {
-          setReportsPanel(panel);
-          setView("reports");
         }}
         onMobileClose={() => setIsMobileNavOpen(false)}
         onLogout={handleLogout}
@@ -1122,10 +1496,11 @@ function AuditApp() {
         <Topbar
           appTitle={appTitle}
           view={view}
-          reportsLabel={activeControlPanel.label}
           user={user}
+          userProfile={userProfile}
+          onUserProfileChange={setUserProfile}
             authenticationEnabled={isFirebaseEnabled}
-          showMenuButton={(view === "dashboard" && isDashboardUnlocked) || view === "history" || view === "reports"}
+          showMenuButton={view === "dashboard" || view === "history" || view === "structure" || view === "integrations"}
           showBackButton={view !== "dashboard"}
           onOpenMenu={() => setIsMobileNavOpen(true)}
           onBack={handleTopbarBack}
@@ -1137,6 +1512,8 @@ function AuditApp() {
           view === "dashboard" ? "max-w-7xl mx-auto w-full" : 
           view === "setup" ? "max-w-5xl mx-auto w-full pb-32" :
           view === "audit" ? "max-w-7xl mx-auto w-full pb-28 pt-2 md:pt-4" :
+          view === "structure" ? "max-w-6xl mx-auto w-full pb-12" :
+          view === "integrations" ? "max-w-6xl mx-auto w-full pb-12" :
           view === "home" ? "max-w-md mx-auto w-full pb-32" :
           "max-w-md mx-auto w-full lg:max-w-4xl lg:mx-0"
         )}>
@@ -1149,32 +1526,9 @@ function AuditApp() {
               exit={{ opacity: 0, y: -20 }}
               className="space-y-8 pt-4"
             >
-              <DashboardView
-                userAuthenticated={Boolean(user)}
-                authenticationEnabled={isFirebaseEnabled}
-                isDashboardUnlocked={isDashboardUnlocked}
-                onUnlockDashboard={() => setIsDashboardUnlocked(true)}
-                onBackToCover={() => setIsDashboardUnlocked(false)}
-                onLogin={handleLogin}
-                onStartNewAudit={startNewAudit}
-                onOpenHistory={() => setView("history")}
-                onResumeDraft={resumeDraftAudit}
-                onRemoveDraft={removeDraftAudit}
-                sortedDraftAudits={sortedDraftAudits}
-                configuredCategoryCount={configuredCategoryCount}
-                sourceLabel={isUsingExternalHistory ? "Sheets" : user && isFirebaseEnabled ? "Firestore" : isSheetSyncConfigured ? "Apps Script" : "Local"}
-                dashboardDateLabel={dashboardDateLabel}
-                currentMonthDashboard={currentMonthDashboard}
-                currentMonthUniqueRoles={currentMonthUniqueRoles}
-                currentMonthUniqueStaff={currentMonthUniqueStaff}
-                monthlyCriticalAudits={monthlyCriticalAudits}
-                dashboardAlerts={dashboardAlerts}
-                recentMonthlyDashboardData={recentMonthlyDashboardData}
-                currentMonthRoleDistributionData={currentMonthRoleDistributionData}
-                currentMonthRoleData={currentMonthRoleData}
-                currentMonthStaffData={currentMonthStaffData}
-                rankingPanels={rankingPanels}
-              />
+              <Suspense fallback={<div className="rounded-[1.8rem] border border-slate-200 bg-white p-6 text-sm font-bold text-slate-500">Cargando dashboard...</div>}>
+                <DashboardView history={history} />
+              </Suspense>
             </motion.div>
           )}
 
@@ -1468,7 +1822,12 @@ function AuditApp() {
                       return (
                       <button
                         key={category.id}
-                        onClick={() => setSelectedRole(category.name)}
+                        onClick={() => {
+                          setSelectedRole(category.name);
+                          if (category.name === "Pre Entrega" || category.name === "Ordenes") {
+                            setSelectedStaff("");
+                          }
+                        }}
                         className={cn(
                           "px-4 py-4 rounded-[1.7rem] border shadow-sm flex flex-col items-center justify-center gap-2.5 group transition-all active:scale-95 lg:items-start lg:text-left lg:min-h-[132px]",
                           isCategoryTracked
@@ -1510,7 +1869,7 @@ function AuditApp() {
                   )}
                 </div>
               ) : (
-                <>
+                <div className="space-y-6">
                 <div className="lg:hidden rounded-[1.6rem] border border-slate-200 bg-[linear-gradient(135deg,#081222_0%,#12345d_100%)] p-3.5 text-white shadow-[0_14px_34px_rgba(12,35,64,0.18)]">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -1519,7 +1878,9 @@ function AuditApp() {
                       <p className="mt-1.5 text-sm font-medium text-slate-300">
                         {isOrdersAudit
                           ? `OR ${session.orderNumber || "sin número"} · ${sessionParticipants.asesorServicio || "Sin asesor"}`
-                          : (selectedStaff || "Sin personal asignado")}
+                          : isPreDeliveryAudit
+                            ? `${auditedFileNames.filter((name) => name.trim()).length}/6 legajos cargados`
+                            : (selectedStaff || "Sin personal asignado")}
                       </p>
                       {isOrdersAudit && (
                         <p className="mt-2 text-xs font-medium leading-relaxed text-slate-300">
@@ -1535,21 +1896,21 @@ function AuditApp() {
                     </button>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-slate-200">{sessionItems.length}/{selectedAuditItems.length} respondidos</span>
+                    <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-slate-200">{sessionItems.length}/{displayedAuditItems.length} respondidos</span>
                     <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-cyan-200">OR {currentOrCompliance.compliance}%</span>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 gap-5 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)]">
-                  <div className="space-y-3 lg:sticky lg:top-24 h-fit">
+                  <div className="space-y-3 lg:sticky lg:top-24 h-fit lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto lg:pr-2">
                     <div className={cn(
                       "hidden space-y-3 rounded-[1.5rem] lg:block",
                       selectedRole === "Ordenes" ? "bg-[#EEF3F9]/95 backdrop-blur-xl" : "bg-[#F9F9F9] border border-slate-200"
                     )}>
                       <div className={cn(
-                        "flex items-center justify-between rounded-[1.4rem] border px-3 py-3 shadow-sm",
+                        "flex items-center justify-between rounded-[1.6rem] border px-4 py-3.5 shadow-[0_18px_44px_rgba(12,35,64,0.22)]",
                         selectedRole === "Ordenes"
-                          ? "bg-gradient-to-br from-slate-950 via-[#0c2340] to-[#1d4f91] border-slate-800 text-white shadow-[0_20px_60px_rgba(12,35,64,0.35)]"
+                          ? "bg-[linear-gradient(135deg,#071225_0%,#0f2d53_58%,#1e4c84_100%)] border-[#214e83] text-white"
                           : "bg-white border-gray-100 text-gray-900"
                       )}>
                         <div className="flex items-center gap-2">
@@ -1573,13 +1934,13 @@ function AuditApp() {
                               {selectedRole === "Ordenes" ? `OR ${session.orderNumber || "sin número"}` : (auditBatchDisplayName || "Auditoría en curso")}
                             </p>
                             {selectedRole === "Ordenes" && (
-                              <p className="mt-1.5 max-w-[180px] text-[11px] font-medium leading-relaxed text-slate-300">
+                              <p className="mt-1.5 max-w-[180px] text-[11px] font-medium leading-relaxed text-blue-100/80">
                                 Asesor {sessionParticipants.asesorServicio || "-"} · Técnico {sessionParticipants.tecnico || "-"}
                               </p>
                             )}
                           </div>
                         </div>
-                        <div className="text-right">
+                        <div className="text-right rounded-xl bg-white/10 px-3 py-2 border border-white/10">
                           <div className={cn(
                             "text-xl font-black leading-none",
                             selectedRole === "Ordenes" ? "text-white" : "text-gray-900"
@@ -1592,41 +1953,40 @@ function AuditApp() {
                           )}>{selectedRole === "Ordenes" ? "Cumplimiento OR" : "Progreso"}</div>
                           <div className={cn(
                             "text-[10px] font-black uppercase tracking-tighter mt-1",
-                            selectedRole === "Ordenes" ? "text-cyan-300" : "text-emerald-600"
-                          )}>Score {currentOrCompliance.compliance}%</div>
+                            selectedRole === "Ordenes" ? "text-cyan-200" : "text-emerald-600"
+                          )}>{sessionItems.length}/{displayedAuditItems.length}</div>
                         </div>
                       </div>
 
-                      <div className="space-y-2 rounded-[1.2rem] border border-slate-200 bg-white p-3 shadow-sm">
-                      <div className="h-2 w-full bg-gray-200 rounded-full overflow-hidden">
-                        <motion.div 
-                          initial={{ width: 0 }}
-                          animate={{ width: `${selectedAuditItems.length > 0 ? (sessionItems.length / selectedAuditItems.length) * 100 : 0}%` }}
-                          className={cn(
-                            "h-full rounded-full",
-                            selectedRole === "Ordenes" ? "bg-gradient-to-r from-[#1d4f91] via-[#0066b1] to-[#00a3e0]" : "bg-blue-500"
-                          )}
-                        />
-                      </div>
-                      <div className="flex justify-between items-center px-1">
-                        <div className="flex gap-3">
-                          <div className="flex items-center gap-1">
-                            <div className="w-2 h-2 rounded-full bg-green-500" />
-                            <span className="text-[10px] font-bold text-gray-500">{sessionItems.filter(i => i.status === 'pass').length}</span>
+                      <div className="space-y-3 rounded-[1.2rem] border border-slate-200 bg-white p-3.5 shadow-sm">
+                        <div className="flex items-center justify-between">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Avance de checklist</p>
+                          <span className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">{displayedAuditItems.length > 0 ? Math.round((sessionItems.length / displayedAuditItems.length) * 100) : 0}%</span>
+                        </div>
+                        <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
+                          <motion.div
+                            initial={{ width: 0 }}
+                            animate={{ width: `${displayedAuditItems.length > 0 ? (sessionItems.length / displayedAuditItems.length) * 100 : 0}%` }}
+                            className={cn(
+                              "h-full rounded-full",
+                              selectedRole === "Ordenes" ? "bg-gradient-to-r from-[#1d4f91] via-[#0066b1] to-[#00a3e0]" : "bg-blue-500"
+                            )}
+                          />
+                        </div>
+                        <div className="grid grid-cols-3 gap-2">
+                          <div className="rounded-lg bg-emerald-50 px-2 py-2 text-center">
+                            <p className="text-[9px] font-black uppercase tracking-[0.14em] text-emerald-700">Cumple</p>
+                            <p className="mt-1 text-sm font-black text-emerald-800">{sessionItems.filter(i => i.status === 'pass').length}</p>
                           </div>
-                          <div className="flex items-center gap-1">
-                            <div className="w-2 h-2 rounded-full bg-red-500" />
-                            <span className="text-[10px] font-bold text-gray-500">{sessionItems.filter(i => i.status === 'fail').length}</span>
+                          <div className="rounded-lg bg-red-50 px-2 py-2 text-center">
+                            <p className="text-[9px] font-black uppercase tracking-[0.14em] text-red-700">Desvío</p>
+                            <p className="mt-1 text-sm font-black text-red-800">{sessionItems.filter(i => i.status === 'fail').length}</p>
                           </div>
-                          <div className="flex items-center gap-1">
-                            <div className="w-2 h-2 rounded-full bg-gray-400" />
-                            <span className="text-[10px] font-bold text-gray-500">{sessionItems.filter(i => i.status === 'na').length}</span>
+                          <div className="rounded-lg bg-slate-100 px-2 py-2 text-center">
+                            <p className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">N/A</p>
+                            <p className="mt-1 text-sm font-black text-slate-700">{sessionItems.filter(i => i.status === 'na').length}</p>
                           </div>
                         </div>
-                        <span className="text-[10px] font-bold text-gray-400 uppercase">
-                          {sessionItems.length} de {selectedAuditItems.length}
-                        </span>
-                      </div>
                       </div>
 
                       {isOrdersAudit && (
@@ -1647,7 +2007,7 @@ function AuditApp() {
 
                   </div>
 
-                    {!isOrdersAudit && selectedAuditStaffOptions.length > 0 && (
+                    {!isOrdersAudit && !isPreDeliveryAudit && selectedAuditStaffOptions.length > 0 && (
                       <div className="space-y-2 rounded-[1.3rem] border border-slate-200 bg-white p-3.5 shadow-sm">
                         <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Personal Auditado</label>
                         <div className="relative">
@@ -1713,77 +2073,512 @@ function AuditApp() {
                             </div>
                           ))}
                         </div>
+
+                        <div className="rounded-2xl border border-slate-200 bg-slate-50/70 px-3 py-3">
+                          <div className="mb-2.5 flex items-center justify-between gap-3">
+                            <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">Avance por asesor</p>
+                            <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-700">
+                              {completedOrdersAdvisorsCount}/{sampledOrdersAdvisorProgress.length} en objetivo
+                            </p>
+                          </div>
+                          <div className="space-y-2">
+                            {sampledOrdersAdvisorProgress.map((advisorProgress) => {
+                              const completionPercent = Math.min(
+                                100,
+                                Math.round((advisorProgress.sampledCount / ORDERS_TARGET_PER_ADVISOR) * 100)
+                              );
+                              const isAdvisorCompleted = advisorProgress.sampledCount >= ORDERS_TARGET_PER_ADVISOR;
+
+                              return (
+                                <div key={advisorProgress.advisorName} className="rounded-xl border border-slate-200 bg-white px-2.5 py-2">
+                                  <div className="mb-1.5 flex items-center justify-between gap-3">
+                                    <p className="truncate text-xs font-bold text-slate-800">{advisorProgress.advisorName}</p>
+                                    <p className={cn(
+                                      "text-[10px] font-black uppercase tracking-[0.15em]",
+                                      isAdvisorCompleted ? "text-emerald-700" : "text-slate-600"
+                                    )}>
+                                      {Math.min(advisorProgress.sampledCount, ORDERS_TARGET_PER_ADVISOR)}/{ORDERS_TARGET_PER_ADVISOR}
+                                    </p>
+                                  </div>
+                                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+                                    <div
+                                      className={cn(
+                                        "h-full rounded-full transition-all",
+                                        isAdvisorCompleted ? "bg-emerald-500" : "bg-[#1d4f91]"
+                                      )}
+                                      style={{ width: `${completionPercent}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {isPreDeliveryAudit && (
+                      <div className="rounded-[1.3rem] border border-slate-200 bg-white px-3.5 py-3.5 shadow-sm space-y-3">
+                        <div className="space-y-2">
+                          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Sección activa</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setPreDeliverySection("general")}
+                              className={cn(
+                                "rounded-2xl border px-3 py-3 text-left transition",
+                                preDeliverySection === "general"
+                                  ? "border-slate-900 bg-slate-950 text-white shadow-[0_12px_24px_rgba(15,23,42,0.18)]"
+                                  : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300"
+                              )}
+                            >
+                              <p className="text-[10px] font-black uppercase tracking-[0.16em]">General</p>
+                              <p className={cn(
+                                "mt-1 text-xs font-medium",
+                                preDeliverySection === "general" ? "text-slate-300" : "text-slate-500"
+                              )}>
+                                {answeredGeneralCount}/{preDeliveryGeneralItems.length} respondidos
+                              </p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setPreDeliverySection("legajos")}
+                              className={cn(
+                                "rounded-2xl border px-3 py-3 text-left transition",
+                                preDeliverySection === "legajos"
+                                  ? "border-slate-900 bg-slate-950 text-white shadow-[0_12px_24px_rgba(15,23,42,0.18)]"
+                                  : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300"
+                              )}
+                            >
+                              <p className="text-[10px] font-black uppercase tracking-[0.16em]">Legajos</p>
+                              <p className={cn(
+                                "mt-1 text-xs font-medium",
+                                preDeliverySection === "legajos" ? "text-slate-300" : "text-slate-500"
+                              )}>
+                                {answeredLegajoCount}/{preDeliveryLegajoItems.length} respondidos
+                              </p>
+                            </button>
+                          </div>
+                        </div>
+                        {preDeliverySection === "general" ? (
+                          <div className="rounded-[1.2rem] border border-slate-200 bg-slate-50 px-4 py-4">
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sección General</p>
+                            <p className="mt-2 text-sm font-black text-slate-900">Solo controles visuales y operativos del sector.</p>
+                            <p className="mt-2 text-xs font-medium text-slate-500">En esta vista no se cargan legajos. Al entrar en Legajos vas a poder ingresar uno y completar su checklist documental.</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            {currentLegajoCompleted && nextPendingLegajoIndex !== null && (
+                              <button
+                                type="button"
+                                onClick={goToNextPendingLegajo}
+                                className="w-full rounded-[1rem] border border-emerald-200 bg-emerald-50 px-3 py-3 text-left transition hover:border-emerald-300"
+                              >
+                                <p className="text-[10px] font-black uppercase tracking-[0.16em] text-emerald-700">Legajo completado</p>
+                                <p className="mt-1 text-[11px] font-medium text-emerald-800">Pasar al siguiente pendiente: Legajo {nextPendingLegajoIndex + 1}</p>
+                              </button>
+                            )}
+                            <div>
+                              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Legajos auditados</p>
+                            </div>
+                            <div className="space-y-2.5">
+                              {preDeliveryLegajoCards.map((legajoCard) => (
+                                <div
+                                  key={`pre-delivery-legajo-card-${legajoCard.index}`}
+                                  className={cn(
+                                    "w-full rounded-[1.15rem] border p-2.5 text-left transition",
+                                    legajoCard.isActive
+                                      ? legajoCard.status === "complete"
+                                        ? "border-emerald-700 bg-emerald-950 text-white shadow-[0_16px_30px_rgba(6,78,59,0.18)]"
+                                        : legajoCard.status === "in-progress"
+                                          ? "border-amber-600 bg-amber-950 text-white shadow-[0_16px_30px_rgba(120,53,15,0.18)]"
+                                          : "border-slate-900 bg-slate-950 text-white shadow-[0_16px_30px_rgba(15,23,42,0.16)]"
+                                      : legajoCard.status === "complete"
+                                        ? "border-emerald-200 bg-emerald-50 hover:border-emerald-300"
+                                        : legajoCard.status === "in-progress"
+                                          ? "border-amber-200 bg-amber-50 hover:border-amber-300"
+                                          : "border-slate-200 bg-slate-50 hover:border-slate-300 hover:bg-white"
+                                  )}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreDeliveryActiveLegajoIndex(legajoCard.index)}
+                                    className="w-full text-left"
+                                  >
+                                    <div className="flex items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <p className={cn(
+                                          "text-[9px] font-black uppercase tracking-[0.18em]",
+                                          legajoCard.isActive
+                                            ? legajoCard.status === "complete"
+                                              ? "text-emerald-200"
+                                              : legajoCard.status === "in-progress"
+                                                ? "text-amber-200"
+                                                : "text-slate-300"
+                                            : legajoCard.status === "complete"
+                                              ? "text-emerald-700"
+                                              : legajoCard.status === "in-progress"
+                                                ? "text-amber-700"
+                                                : "text-slate-400"
+                                        )}>Legajo {legajoCard.index + 1}</p>
+                                        <p className={cn(
+                                            "mt-1.5 text-[13px] font-black leading-snug",
+                                          legajoCard.isActive ? "text-white" : "text-slate-900"
+                                        )}>{legajoCard.trimmedName || "Sin nombre cargado"}</p>
+                                      </div>
+                                        <div className="space-y-1.5 text-right">
+                                        <div className={cn(
+                                            "rounded-full px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.16em]",
+                                          legajoCard.isActive
+                                            ? legajoCard.status === "complete"
+                                              ? "bg-white/10 text-emerald-100"
+                                              : legajoCard.status === "in-progress"
+                                                ? "bg-white/10 text-amber-100"
+                                                : "bg-white/10 text-white"
+                                            : legajoCard.status === "complete"
+                                              ? "bg-white text-emerald-700"
+                                              : legajoCard.status === "in-progress"
+                                                ? "bg-white text-amber-700"
+                                                : "bg-white text-slate-600"
+                                        )}>
+                                          {legajoCard.status === "complete" ? "Completo" : legajoCard.status === "in-progress" ? "En progreso" : "Vacio"}
+                                        </div>
+                                        <p className={cn(
+                                            "text-[10px] font-black",
+                                          legajoCard.isActive ? "text-white" : "text-slate-700"
+                                        )}>{legajoCard.answeredCount}/{legajoCard.totalCount}</p>
+                                      </div>
+                                    </div>
+
+                                    <div className={cn(
+                                        "mt-2.5 h-1.5 w-full overflow-hidden rounded-full",
+                                      legajoCard.isActive ? "bg-white/10" : "bg-white"
+                                    )}>
+                                      <div
+                                        className={cn(
+                                          "h-full rounded-full transition-all",
+                                          legajoCard.status === "complete"
+                                            ? "bg-emerald-500"
+                                            : legajoCard.status === "in-progress"
+                                              ? "bg-amber-500"
+                                              : "bg-slate-300"
+                                        )}
+                                        style={{ width: `${Math.max(legajoCard.completionRatio * 100, legajoCard.status === "empty" ? 12 : 0)}%` }}
+                                      />
+                                    </div>
+                                  </button>
+
+                                  <div className="mt-2.5 space-y-1.5">
+                                    <label className={cn(
+                                      "block text-[9px] font-black uppercase tracking-[0.18em]",
+                                      legajoCard.isActive
+                                        ? legajoCard.status === "complete"
+                                          ? "text-emerald-200"
+                                          : legajoCard.status === "in-progress"
+                                            ? "text-amber-200"
+                                            : "text-slate-300"
+                                        : legajoCard.status === "complete"
+                                          ? "text-emerald-700"
+                                          : legajoCard.status === "in-progress"
+                                            ? "text-amber-700"
+                                            : "text-slate-400"
+                                    )}>Nombre de persona o legajo</label>
+                                    <input
+                                      type="text"
+                                      value={legajoCard.name}
+                                      onFocus={() => setPreDeliveryActiveLegajoIndex(legajoCard.index)}
+                                      onChange={(e) => {
+                                        const nextAuditedFileNames = [...auditedFileNames];
+                                        nextAuditedFileNames[legajoCard.index] = e.target.value;
+                                        setSession({
+                                          ...session,
+                                          auditedFileNames: nextAuditedFileNames,
+                                        });
+                                      }}
+                                      placeholder={`Nombre del legajo o persona ${legajoCard.index + 1}`}
+                                      className={cn(
+                                        "w-full rounded-[1rem] border px-3.5 py-2.5 text-[13px] font-bold shadow-sm focus:outline-none",
+                                        legajoCard.isActive
+                                          ? legajoCard.status === "complete"
+                                            ? "border-white/10 bg-white/10 text-white placeholder:text-emerald-100"
+                                            : legajoCard.status === "in-progress"
+                                              ? "border-white/10 bg-white/10 text-white placeholder:text-amber-100"
+                                              : "border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                                          : legajoCard.status === "complete"
+                                            ? "border-emerald-200 bg-white text-slate-900"
+                                            : legajoCard.status === "in-progress"
+                                              ? "border-amber-200 bg-white text-slate-900"
+                                              : "border-gray-200 bg-white text-slate-900"
+                                      )}
+                                    />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
 
-                    <div className="space-y-4 pb-40 lg:pb-12 min-w-0">
+                    <div className={cn("space-y-4 min-w-0 lg:pb-12", isQuickAuditMode ? "pb-64" : "pb-40")}>
                       <div className="rounded-[1.6rem] border border-slate-200 bg-white p-4 shadow-sm lg:p-4">
-                      <div className="mb-4 grid grid-cols-3 gap-2 lg:hidden">
-                        <div className="rounded-[1.2rem] border border-slate-200 bg-slate-50 px-3 py-3">
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Total</p>
-                          <p className="mt-2 text-base font-black text-slate-900">{selectedAuditItems.length}</p>
+                        <div className="mb-4 flex items-center justify-between gap-3 lg:hidden">
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Flujo</p>
+                            <p className="mt-1 text-sm font-black text-slate-950">{draftSaveStateLabel}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsQuickAuditMode((current) => !current)}
+                            className={cn(
+                              "rounded-full border px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition",
+                              isQuickAuditMode
+                                ? "border-slate-900 bg-slate-950 text-white"
+                                : "border-slate-200 bg-white text-slate-600"
+                            )}
+                          >
+                            {isQuickAuditMode ? "Modo rápido" : "Modo completo"}
+                          </button>
                         </div>
-                        <div className="rounded-[1.2rem] border border-slate-200 bg-slate-50 px-3 py-3">
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">OR</p>
-                          <p className="mt-2 text-base font-black text-slate-900">{currentOrCompliance.compliance}%</p>
-                        </div>
-                        <div className="rounded-[1.2rem] border border-slate-200 bg-slate-50 px-3 py-3">
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Roles</p>
-                          <p className="mt-2 text-base font-black text-slate-900">{isOrdersAudit ? currentOrRoleScores.length : 1}</p>
-                        </div>
-                      </div>
 
-                      <div className="hidden lg:flex items-center justify-between gap-3 border-b border-slate-100 pb-3 mb-3">
-                        <div>
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Checklist</p>
-                          <h3 className="mt-1 text-base font-black text-slate-950">{isOrdersAudit ? "OR Postventa" : "Controles"}</h3>
+                        <div className="hidden lg:flex items-center justify-between gap-3 border-b border-slate-100 pb-3 mb-3">
+                          <div>
+                            <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Checklist</p>
+                            <h3 className="mt-1 text-base font-black text-slate-950">
+                              {isOrdersAudit ? "OR Postventa" : isPreDeliveryAudit ? `Controles · ${preDeliverySection === "general" ? "General" : "Legajos"}` : "Controles"}
+                            </h3>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              "rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.14em]",
+                              draftSaveState === "saving" ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"
+                            )}>{draftSaveState === "saving" ? "Guardando" : "Guardado"}</span>
+                            <button
+                              type="button"
+                              onClick={() => setIsQuickAuditMode((current) => !current)}
+                              className={cn(
+                                "rounded-full border px-3 py-2 text-[10px] font-black uppercase tracking-[0.14em] transition",
+                                isQuickAuditMode
+                                  ? "border-slate-900 bg-slate-950 text-white"
+                                  : "border-slate-200 bg-white text-slate-600"
+                              )}
+                            >
+                              {isQuickAuditMode ? "Modo rápido" : "Modo completo"}
+                            </button>
+                          </div>
                         </div>
-                        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-400">{selectedAuditItems.length} puntos</p>
-                      </div>
 
-                      <div className="space-y-4">
-                        {selectedAuditItems.map((auditItem) => (
-                          <AuditItemRow 
-                            key={auditItem.id}
-                            rowId={`audit-item-${auditItem.id}`}
-                            question={auditItem.text}
-                            index={selectedAuditItems.findIndex((item) => item.id === auditItem.id)}
-                            item={session.items?.find(i => i.question === auditItem.text)}
-                            required={false}
-                            block={auditItem.block}
-                            description={auditItem.description}
-                            responsibleRoles={auditItem.responsibleRoles}
-                            allowsNa={auditItem.allowsNa}
-                            priority={auditItem.priority}
-                            guidance={auditItem.guidance}
-                            requiresCommentOnFail={auditItem.requiresCommentOnFail}
-                            emphasized={focusedAuditItemId === auditItem.id}
-                            showStructuredQuestion={isOrdersAudit}
-                            onStatusToggle={(status) => toggleItemStatus(auditItem.text, status)}
-                            onCommentUpdate={(comment) => updateItemComment(auditItem.text, comment)}
-                            onPhotoUpdate={(photoUrl) => updateItemPhoto(auditItem.text, photoUrl)}
-                          />
-                        ))}
-                      </div>
-                    </div>
+                        <div className="space-y-4">
+                          {isPreDeliveryAudit ? (
+                            <>
+                              {preDeliverySection === "general" && preDeliveryGeneralItems.length > 0 && (
+                                <div className="space-y-4 rounded-[1.5rem] border border-slate-200 bg-slate-50/70 p-3 lg:p-4">
+                                  <div className="space-y-1 px-1">
+                                    <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Sección General</p>
+                                    <h4 className="text-sm font-black text-slate-950">Controles generales del sector</h4>
+                                  </div>
+                                  <div className="space-y-4">
+                                    {preDeliveryGeneralItems.map((auditItem, index) => (
+                                      <AuditItemRow
+                                        key={auditItem.id}
+                                        rowId={`audit-item-${auditItem.id}`}
+                                        question={auditItem.text}
+                                        index={index}
+                                        item={session.items?.find((item) => item.id === auditItem.id || item.question === auditItem.text)}
+                                        required={false}
+                                        block={auditItem.block}
+                                        description={auditItem.description}
+                                        responsibleRoles={auditItem.responsibleRoles}
+                                        allowsNa={auditItem.allowsNa}
+                                        priority={auditItem.priority}
+                                        guidance={auditItem.guidance}
+                                        requiresCommentOnFail={auditItem.requiresCommentOnFail}
+                                        emphasized={focusedAuditItemId === auditItem.id || activeAuditItemId === auditItem.id}
+                                        showStructuredQuestion={false}
+                                        compactMeta
+                                        quickMode={isQuickAuditMode}
+                                        isActive={activeAuditItemId === auditItem.id}
+                                        observationSuggestions={observationSuggestions}
+                                        onActivate={() => focusAuditItem(auditItem)}
+                                        onStatusToggle={(status) => toggleItemStatus(auditItem.text, status)}
+                                        onCommentUpdate={(comment) => updateItemComment(auditItem.text, comment)}
+                                        onPhotoUpdate={(photoUrl) => updateItemPhoto(auditItem.text, photoUrl)}
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
 
-                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Observaciones</label>
-                        <textarea 
-                          placeholder="Observaciones"
-                          value={session.notes || ""}
-                          onChange={(e) => setSession({ ...session, notes: e.target.value })}
-                          className={cn(
-                            "w-full p-6 border rounded-3xl font-medium text-sm focus:outline-none shadow-sm min-h-[160px]",
-                            selectedRole === "Ordenes"
-                              ? "bg-white border-slate-200 text-slate-700"
-                              : "bg-white border-gray-200"
+                              {preDeliverySection === "legajos" && (
+                                activePreDeliveryLegajoName ? (
+                                  <div className="space-y-4">
+                                    {activePreDeliveryLegajoItems.map((auditItem, index) => (
+                                      <AuditItemRow
+                                        key={auditItem.id}
+                                        rowId={`audit-item-${auditItem.id}`}
+                                        question={formatPreDeliveryLegajoQuestion(auditItem.text)}
+                                        index={index}
+                                        item={session.items?.find((item) => item.id === auditItem.id || item.question === auditItem.text)}
+                                        required={false}
+                                        block={auditItem.block}
+                                        description={auditItem.description}
+                                        responsibleRoles={auditItem.responsibleRoles}
+                                        allowsNa={auditItem.allowsNa}
+                                        priority={auditItem.priority}
+                                        guidance={auditItem.guidance}
+                                        requiresCommentOnFail={auditItem.requiresCommentOnFail}
+                                        emphasized={focusedAuditItemId === auditItem.id || activeAuditItemId === auditItem.id}
+                                        showStructuredQuestion={false}
+                                        compactMeta
+                                        quickMode={isQuickAuditMode}
+                                        isActive={activeAuditItemId === auditItem.id}
+                                        observationSuggestions={observationSuggestions}
+                                        onActivate={() => focusAuditItem(auditItem)}
+                                        onStatusToggle={(status) => toggleItemStatus(auditItem.text, status)}
+                                        onCommentUpdate={(comment) => updateItemComment(auditItem.text, comment)}
+                                        onPhotoUpdate={(photoUrl) => updateItemPhoto(auditItem.text, photoUrl)}
+                                      />
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="rounded-[1.2rem] border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center">
+                                    <p className="text-sm font-bold text-slate-600">Ingresá un nombre en el legajo activo para ver sus controles.</p>
+                                  </div>
+                                )
+                              )}
+                            </>
+                          ) : (
+                            displayedAuditItems.map((auditItem) => (
+                              <AuditItemRow
+                                key={auditItem.id}
+                                rowId={`audit-item-${auditItem.id}`}
+                                question={auditItem.text}
+                                index={displayedAuditItems.findIndex((item) => item.id === auditItem.id)}
+                                item={session.items?.find((item) => item.id === auditItem.id || item.question === auditItem.text)}
+                                required={false}
+                                block={auditItem.block}
+                                description={auditItem.description}
+                                responsibleRoles={auditItem.responsibleRoles}
+                                allowsNa={auditItem.allowsNa}
+                                priority={auditItem.priority}
+                                guidance={auditItem.guidance}
+                                requiresCommentOnFail={auditItem.requiresCommentOnFail}
+                                emphasized={focusedAuditItemId === auditItem.id || activeAuditItemId === auditItem.id}
+                                showStructuredQuestion={isOrdersAudit}
+                                quickMode={isQuickAuditMode}
+                                isActive={activeAuditItemId === auditItem.id}
+                                observationSuggestions={observationSuggestions}
+                                onActivate={() => focusAuditItem(auditItem)}
+                                onStatusToggle={(status) => toggleItemStatus(auditItem.text, status)}
+                                onCommentUpdate={(comment) => updateItemComment(auditItem.text, comment)}
+                                onPhotoUpdate={(photoUrl) => updateItemPhoto(auditItem.text, photoUrl)}
+                              />
+                            ))
                           )}
-                        />
+                        </div>
+                      </div>
 
-                        <div className="rounded-[1.8rem] border border-slate-200 bg-white p-4 shadow-sm space-y-4 lg:hidden">
+                      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-gray-400 px-1">Observaciones</label>
+                          <textarea
+                            placeholder="Observaciones"
+                            value={session.notes || ""}
+                            onChange={(e) => setSession({ ...session, notes: e.target.value })}
+                            className={cn(
+                              "w-full p-6 border rounded-3xl font-medium text-sm focus:outline-none shadow-sm min-h-[160px]",
+                              selectedRole === "Ordenes"
+                                ? "bg-white border-slate-200 text-slate-700"
+                                : "bg-white border-gray-200"
+                            )}
+                          />
+
+                          <div className="rounded-[1.8rem] border border-slate-200 bg-white p-4 shadow-sm space-y-4 lg:hidden">
+                            <div>
+                              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cierre</p>
+                              <p className="mt-2 text-sm font-black text-slate-900">Enviar</p>
+                              {failItemsWithoutCommentCount > 0 && (
+                                <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Faltan {failItemsWithoutCommentCount} observaciones obligatorias en desvíos.</p>
+                              )}
+                            </div>
+
+                            {isOrdersAudit ? (
+                              <div className="grid grid-cols-1 gap-2.5">
+                                <button
+                                  onClick={() => handleAuditSubmit("continue")}
+                                  disabled={isSubmitDisabled}
+                                  className={cn(
+                                    "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                                    !isSubmitDisabled
+                                      ? "bg-white text-slate-900 border border-slate-200 shadow-slate-100 hover:bg-slate-50"
+                                      : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                                  )}
+                                >
+                                  {isSendingToSheet ? (
+                                    <>
+                                      <div className="w-4 h-4 border-2 border-slate-300 border-t-slate-900 rounded-full animate-spin" />
+                                      Guardando...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Save className="w-4 h-4" />
+                                      Guardar y seguir con otra OR
+                                    </>
+                                  )}
+                                </button>
+
+                                <button
+                                  onClick={() => handleAuditSubmit("finish")}
+                                  disabled={isSubmitDisabled}
+                                  className={cn(
+                                    "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                                    !isSubmitDisabled
+                                      ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]"
+                                      : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                                  )}
+                                >
+                                  {isSendingToSheet ? (
+                                    <>
+                                      <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                      Guardando...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Save className="w-4 h-4" />
+                                      Guardar y finalizar
+                                    </>
+                                  )}
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => handleAuditSubmit("finish")}
+                                disabled={isSubmitDisabled}
+                                className={cn(
+                                  "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                                  !isSubmitDisabled
+                                    ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]"
+                                    : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                                )}
+                              >
+                                {isSendingToSheet ? (
+                                  <>
+                                    <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                    Enviando al Sheet...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Save className="w-4 h-4" />
+                                    Enviar
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="hidden rounded-[1.8rem] border border-slate-200 bg-white p-4 shadow-sm space-y-4 lg:sticky lg:top-28 lg:block">
                           <div>
                             <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cierre</p>
                             <p className="mt-2 text-sm font-black text-slate-900">Enviar</p>
@@ -1792,157 +2587,295 @@ function AuditApp() {
                             )}
                           </div>
 
+                          {isOrdersAudit ? (
+                            <div className="grid grid-cols-1 gap-2.5">
+                              <button
+                                onClick={() => handleAuditSubmit("continue")}
+                                disabled={isSubmitDisabled}
+                                className={cn(
+                                  "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                                  !isSubmitDisabled
+                                    ? "bg-white text-slate-900 border border-slate-200 shadow-slate-100 hover:bg-slate-50"
+                                    : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                                )}
+                              >
+                                {isSendingToSheet ? (
+                                  <>
+                                    <div className="w-4 h-4 border-2 border-slate-300 border-t-slate-900 rounded-full animate-spin" />
+                                    Guardando...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Save className="w-4 h-4" />
+                                    Guardar y seguir con otra OR
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                onClick={() => handleAuditSubmit("finish")}
+                                disabled={isSubmitDisabled}
+                                className={cn(
+                                  "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                                  !isSubmitDisabled
+                                    ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]"
+                                    : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                                )}
+                              >
+                                {isSendingToSheet ? (
+                                  <>
+                                    <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                    Guardando...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Save className="w-4 h-4" />
+                                    Guardar y finalizar
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => handleAuditSubmit("finish")}
+                              disabled={isSubmitDisabled}
+                              className={cn(
+                                "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
+                                !isSubmitDisabled
+                                  ? "bg-green-600 text-white shadow-green-100 hover:bg-green-700"
+                                  : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                              )}
+                            >
+                              {isSendingToSheet ? (
+                                <>
+                                  <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                  Enviando al Sheet...
+                                </>
+                              ) : (
+                                <>
+                                  <Save className="w-4 h-4" />
+                                  Enviar
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {isQuickAuditMode && activeAuditItem && (
+                      <div className="fixed inset-x-0 bottom-[5.75rem] z-40 border-t border-slate-200 bg-white/96 p-3 backdrop-blur-xl lg:hidden">
+                        <div className="mx-auto max-w-6xl rounded-[1.4rem] border border-slate-200 bg-white px-3 py-3 shadow-[0_20px_40px_rgba(15,23,42,0.12)]">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">Punto activo {activeAuditItemIndex + 1}/{visibleAuditItems.length}</p>
+                              <p className="mt-1 line-clamp-2 text-sm font-black text-slate-950">{isPreDeliveryAudit && preDeliverySection === "legajos" ? formatPreDeliveryLegajoQuestion(activeAuditItem.text) : activeAuditItem.text}</p>
+                            </div>
+                            <span className={cn(
+                              "shrink-0 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.14em]",
+                              activeAuditSessionItem?.status === "pass" ? "bg-emerald-50 text-emerald-700" :
+                              activeAuditSessionItem?.status === "fail" ? "bg-red-50 text-red-700" :
+                              activeAuditSessionItem?.status === "na" ? "bg-slate-100 text-slate-600" :
+                              "bg-amber-50 text-amber-700"
+                            )}>
+                              {getAuditItemStatusLabel(activeAuditSessionItem?.status)}
+                            </span>
+                          </div>
+                          <div className="mt-3 grid grid-cols-3 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => toggleItemStatus(activeAuditItem.text, "pass")}
+                              className="rounded-[1rem] bg-emerald-500 px-3 py-3 text-[11px] font-black uppercase tracking-[0.14em] text-white"
+                            >
+                              Si
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => toggleItemStatus(activeAuditItem.text, "fail")}
+                              className="rounded-[1rem] bg-red-500 px-3 py-3 text-[11px] font-black uppercase tracking-[0.14em] text-white"
+                            >
+                              No
+                            </button>
+                            {activeAuditItem.allowsNa !== false ? (
+                              <button
+                                type="button"
+                                onClick={() => toggleItemStatus(activeAuditItem.text, "na")}
+                                className="rounded-[1rem] bg-slate-900 px-3 py-3 text-[11px] font-black uppercase tracking-[0.14em] text-white"
+                              >
+                                N/A
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled
+                                className="cursor-not-allowed rounded-[1rem] bg-slate-200 px-3 py-3 text-[11px] font-black uppercase tracking-[0.14em] text-slate-500"
+                              >
+                                N/A
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/92 p-3 backdrop-blur-xl lg:hidden">
+                      <div className="mx-auto flex max-w-6xl items-center gap-3 rounded-[1.4rem] bg-slate-950 px-4 py-3 text-white shadow-[0_20px_40px_rgba(15,23,42,0.24)]">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cierre</p>
+                          <p className="mt-1 text-sm font-black">{sessionItems.length}/{displayedAuditItems.length} respondidos</p>
+                          {failItemsWithoutCommentCount > 0 ? (
+                            <p className="mt-1 text-[11px] font-bold text-amber-300">Faltan {failItemsWithoutCommentCount} observaciones obligatorias.</p>
+                          ) : (
+                            <p className="mt-1 text-[11px] font-bold text-slate-400">{draftSaveStateLabel} · Score actual {calculateCurrentScore()}%</p>
+                          )}
+                        </div>
+                        {isOrdersAudit ? (
+                          <div className="grid min-w-[230px] grid-cols-1 gap-2">
+                            <button
+                              onClick={() => handleAuditSubmit("continue")}
+                              disabled={isSubmitDisabled}
+                              className={cn(
+                                "inline-flex items-center justify-center gap-2 rounded-[1rem] px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] transition-all",
+                                !isSubmitDisabled
+                                  ? "bg-white text-slate-950"
+                                  : "cursor-not-allowed bg-white/10 text-slate-400"
+                              )}
+                            >
+                              {isSendingToSheet ? (
+                                <>
+                                  <div className="h-4 w-4 rounded-full border-2 border-slate-400 border-t-slate-900 animate-spin" />
+                                  Guardando
+                                </>
+                              ) : (
+                                <>
+                                  <Save className="h-4 w-4" />
+                                  Guardar y seguir
+                                </>
+                              )}
+                            </button>
+                            <button
+                              onClick={() => handleAuditSubmit("finish")}
+                              disabled={isSubmitDisabled}
+                              className={cn(
+                                "inline-flex items-center justify-center gap-2 rounded-[1rem] px-3 py-2.5 text-[10px] font-black uppercase tracking-[0.14em] transition-all",
+                                !isSubmitDisabled
+                                  ? "bg-slate-700 text-white"
+                                  : "cursor-not-allowed bg-white/10 text-slate-400"
+                              )}
+                            >
+                              {isSendingToSheet ? (
+                                <>
+                                  <div className="h-4 w-4 rounded-full border-2 border-slate-300 border-t-white animate-spin" />
+                                  Guardando
+                                </>
+                              ) : (
+                                <>
+                                  <Save className="h-4 w-4" />
+                                  Guardar y finalizar
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        ) : (
                           <button
-                            onClick={handleAuditSubmit}
-                            disabled={sessionItems.length === 0 || isSendingToSheet || failItemsWithoutCommentCount > 0}
+                            onClick={() => handleAuditSubmit("finish")}
+                            disabled={isSubmitDisabled}
                             className={cn(
-                              "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
-                              sessionItems.length > 0 && !isSendingToSheet && failItemsWithoutCommentCount === 0
-                                ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]"
-                                : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
+                              "inline-flex min-w-[156px] items-center justify-center gap-2 rounded-[1.1rem] px-4 py-3 text-[11px] font-black uppercase tracking-[0.16em] transition-all",
+                              !isSubmitDisabled
+                                ? "bg-white text-slate-950"
+                                : "cursor-not-allowed bg-white/10 text-slate-400"
                             )}
                           >
                             {isSendingToSheet ? (
                               <>
-                                <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                                Enviando al Sheet...
+                                <div className="h-4 w-4 rounded-full border-2 border-slate-400 border-t-slate-900 animate-spin" />
+                                Enviando
                               </>
                             ) : (
                               <>
-                                <Save className="w-4 h-4" />
+                                <Save className="h-4 w-4" />
                                 Enviar
                               </>
                             )}
                           </button>
-                        </div>
-                      </div>
-
-                      <div className="hidden rounded-[1.8rem] border border-slate-200 bg-white p-4 shadow-sm space-y-4 lg:sticky lg:top-28 lg:block">
-                        <div>
-                          <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cierre</p>
-                          <p className="mt-2 text-sm font-black text-slate-900">Enviar</p>
-                          {failItemsWithoutCommentCount > 0 && (
-                            <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">Faltan {failItemsWithoutCommentCount} observaciones obligatorias en desvíos.</p>
-                          )}
-                        </div>
-
-                        <button
-                          onClick={handleAuditSubmit}
-                          disabled={sessionItems.length === 0 || isSendingToSheet || failItemsWithoutCommentCount > 0}
-                          className={cn(
-                            "w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg",
-                            sessionItems.length > 0 && !isSendingToSheet && failItemsWithoutCommentCount === 0
-                              ? (selectedRole === "Ordenes" ? "bg-slate-950 text-white shadow-slate-300 hover:bg-[#0c2340]" : "bg-green-600 text-white shadow-green-100 hover:bg-green-700")
-                              : "bg-gray-200 text-gray-500 cursor-not-allowed shadow-none"
-                          )}
-                        >
-                          {isSendingToSheet ? (
-                            <>
-                              <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                              Enviando al Sheet...
-                            </>
-                          ) : (
-                            <>
-                              <Save className="w-4 h-4" />
-                              Enviar
-                            </>
-                          )}
-                        </button>
+                        )}
                       </div>
                     </div>
-
                   </div>
                 </div>
+                )}
+              </motion.div>
+            )}
 
-                <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/92 p-3 backdrop-blur-xl lg:hidden">
-                  <div className="mx-auto flex max-w-6xl items-center gap-3 rounded-[1.4rem] bg-slate-950 px-4 py-3 text-white shadow-[0_20px_40px_rgba(15,23,42,0.24)]">
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-400">Cierre</p>
-                      <p className="mt-1 text-sm font-black">{sessionItems.length}/{selectedAuditItems.length} respondidos</p>
-                      {failItemsWithoutCommentCount > 0 ? (
-                        <p className="mt-1 text-[11px] font-bold text-amber-300">Faltan {failItemsWithoutCommentCount} observaciones obligatorias.</p>
-                      ) : (
-                        <p className="mt-1 text-[11px] font-bold text-slate-400">Score actual {calculateCurrentScore()}%</p>
-                      )}
-                    </div>
-                    <button
-                      onClick={handleAuditSubmit}
-                      disabled={sessionItems.length === 0 || isSendingToSheet || failItemsWithoutCommentCount > 0}
-                      className={cn(
-                        "inline-flex min-w-[156px] items-center justify-center gap-2 rounded-[1.1rem] px-4 py-3 text-[11px] font-black uppercase tracking-[0.16em] transition-all",
-                        sessionItems.length > 0 && !isSendingToSheet && failItemsWithoutCommentCount === 0
-                          ? "bg-white text-slate-950"
-                          : "cursor-not-allowed bg-white/10 text-slate-400"
-                      )}
-                    >
-                      {isSendingToSheet ? (
-                        <>
-                          <div className="h-4 w-4 rounded-full border-2 border-slate-400 border-t-slate-900 animate-spin" />
-                          Enviando
-                        </>
-                      ) : (
-                        <>
-                          <Save className="h-4 w-4" />
-                          Enviar
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-                </>
-              )}
-            </motion.div>
-          )}
-
-          {view === "reports" && (
-            <motion.div 
-              key="reports"
+          {view === "structure" && canAccessStructure && (
+            <motion.div
+              key="structure"
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -20 }}
               className="space-y-6 pb-12"
             >
-              <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-bold">Control</h2>
-                <div className="flex items-center gap-2 text-[11px] font-bold text-slate-500">
-                  <activeControlPanel.icon className="w-4 h-4" />
-                  {activeControlPanel.label}
-                </div>
-              </div>
+              <Suspense fallback={<div className="rounded-[1.6rem] border border-slate-200 bg-white p-6 text-sm font-bold text-slate-500">Cargando estructura...</div>}>
+                <StructurePanel
+                  selectedStructureScope={selectedStructureScope}
+                  setSelectedStructureScope={setSelectedStructureScope}
+                  structureStorageLabel={structureStorageLabel}
+                  isLoadingStructureFromCloud={isLoadingStructureFromCloud}
+                  isSavingStructureToCloud={isSavingStructureToCloud}
+                  handleLoadStructureFromCloud={handleLoadStructureFromCloud}
+                  handleSaveStructureToCloud={handleSaveStructureToCloud}
+                  handleResetStructure={handleResetStructure}
+                  auditCategories={auditCategories}
+                  selectedStructureCategory={selectedStructureCategory}
+                  selectedStructureCategoryId={selectedStructureCategoryId}
+                  setSelectedStructureCategoryId={setSelectedStructureCategoryId}
+                  updateCategory={updateCategory}
+                  handleDeleteCategory={handleDeleteCategory}
+                  newCategoryName={newCategoryName}
+                  setNewCategoryName={setNewCategoryName}
+                  newCategoryDescription={newCategoryDescription}
+                  setNewCategoryDescription={setNewCategoryDescription}
+                  newCategoryStaff={newCategoryStaff}
+                  setNewCategoryStaff={setNewCategoryStaff}
+                  handleAddCategory={handleAddCategory}
+                  newItemText={newItemText}
+                  setNewItemText={setNewItemText}
+                  newItemDescription={newItemDescription}
+                  setNewItemDescription={setNewItemDescription}
+                  newItemGuidance={newItemGuidance}
+                  setNewItemGuidance={setNewItemGuidance}
+                  newItemBlock={newItemBlock}
+                  setNewItemBlock={setNewItemBlock}
+                  newItemSector={newItemSector}
+                  setNewItemSector={setNewItemSector}
+                  newItemResponsibleRoles={newItemResponsibleRoles}
+                  setNewItemResponsibleRoles={setNewItemResponsibleRoles}
+                  newItemPriority={newItemPriority}
+                  setNewItemPriority={setNewItemPriority}
+                  newItemWeight={newItemWeight}
+                  setNewItemWeight={setNewItemWeight}
+                  newItemRequired={newItemRequired}
+                  setNewItemRequired={setNewItemRequired}
+                  newItemAllowsNa={newItemAllowsNa}
+                  setNewItemAllowsNa={setNewItemAllowsNa}
+                  newItemActive={newItemActive}
+                  setNewItemActive={setNewItemActive}
+                  newItemRequiresCommentOnFail={newItemRequiresCommentOnFail}
+                  setNewItemRequiresCommentOnFail={setNewItemRequiresCommentOnFail}
+                  handleAddItem={handleAddItem}
+                />
+              </Suspense>
+            </motion.div>
+          )}
 
-              <div className="rounded-[2rem] border border-slate-200 bg-white p-3 shadow-sm space-y-3">
-                <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-                  {controlPanels.map((panel) => (
-                    <button
-                      key={panel.id}
-                      onClick={() => setReportsPanel(panel.id)}
-                      className={cn(
-                        "rounded-[1.5rem] border px-4 py-4 text-left transition-all",
-                        reportsPanel === panel.id
-                          ? "border-slate-950 bg-slate-950 text-white shadow-lg shadow-slate-200"
-                          : "border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-300 hover:bg-white"
-                      )}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={cn(
-                          "flex h-10 w-10 items-center justify-center rounded-2xl",
-                          reportsPanel === panel.id ? "bg-white/10 text-white" : "bg-white text-slate-700"
-                        )}>
-                          <panel.icon className="w-5 h-5" />
-                        </div>
-                        <p className="text-sm font-black">{panel.label}</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-                <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 px-4 py-4">
-                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Activo</p>
-                  <p className="mt-2 text-base font-black text-slate-900">{activeControlPanel.label}</p>
-                </div>
-              </div>
-
-              {reportsPanel === "integrations" && (
-              <>
+          {view === "integrations" && canAccessIntegrations && (
+            <motion.div
+              key="integrations"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-6 pb-12"
+            >
               <div className="bg-white/90 p-6 rounded-3xl shadow-sm border border-white/80 space-y-4 backdrop-blur">
                 <div>
                   <h3 className="text-lg font-black text-slate-900">Integraciones</h3>
@@ -1954,7 +2887,7 @@ function AuditApp() {
                       type="url"
                       value={webhookUrl}
                       onChange={(e) => setWebhookUrl(e.target.value)}
-                      placeholder="https://script.google.com/macros/s/AKfycbxUbxbHYP4UIiyajM_6IVNfsFMgXEpxsvMmwyisqoo4_8lBxNzcMiPyXftxheyh7Q04/exec"
+                      placeholder="https://script.google.com/macros/s/.../exec"
                       className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-medium text-sm focus:outline-none"
                     />
                   </div>
@@ -1964,108 +2897,24 @@ function AuditApp() {
                       type="url"
                       value={sheetCsvUrl}
                       onChange={(e) => setSheetCsvUrl(e.target.value)}
-                      placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv"
+                      placeholder="https://docs.google.com/spreadsheets/.../pub?output=csv"
                       className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-medium text-sm focus:outline-none"
                     />
                   </div>
                 </div>
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex justify-end">
                   <button
                     onClick={saveIntegrationSettings}
-                    className="sm:ml-auto px-5 py-3 rounded-2xl bg-slate-900 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all"
+                    className="px-5 py-3 rounded-2xl bg-slate-900 text-white text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all"
                   >
-                    Guardar configuración
+                    Guardar configuracion
                   </button>
                 </div>
               </div>
-
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-                <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm">
-                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Apps Script</p>
-                  <p className="mt-2 text-lg font-black text-slate-900">{isSheetSyncConfigured ? "Conectado" : "Sin definir"}</p>
-                  <p className="mt-2 text-sm font-medium text-slate-500">Usado para espejar auditorías y automatizar el envío a Google Sheets.</p>
-                </div>
-                <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm">
-                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Historial externo</p>
-                  <p className="mt-2 text-lg font-black text-slate-900">{isHistorySyncConfigured ? "Disponible" : "Pendiente"}</p>
-                  <p className="mt-2 text-sm font-medium text-slate-500">Usa Apps Script para importar auditorías completas y deja el CSV como respaldo operativo.</p>
-                </div>
-                <div className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm">
-                  <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Modelo recomendado</p>
-                  <p className="mt-2 text-lg font-black text-slate-900">Fuente + espejo</p>
-                  <p className="mt-2 text-sm font-medium text-slate-500">Apps Script y Google Sheets como capa operativa compartida, con respaldo local en el dispositivo.</p>
-                </div>
-              </div>
-              </>
-              )}
-
-              {reportsPanel === "structure" && (
-              <>
-              <StructurePanel
-                selectedStructureScope={selectedStructureScope}
-                setSelectedStructureScope={setSelectedStructureScope}
-                structureStorageLabel={structureStorageLabel}
-                isLoadingStructureFromCloud={isLoadingStructureFromCloud}
-                isSavingStructureToCloud={isSavingStructureToCloud}
-                handleLoadStructureFromCloud={handleLoadStructureFromCloud}
-                handleSaveStructureToCloud={handleSaveStructureToCloud}
-                handleResetStructure={handleResetStructure}
-                auditCategories={auditCategories}
-                selectedStructureCategory={selectedStructureCategory}
-                selectedStructureCategoryId={selectedStructureCategoryId}
-                setSelectedStructureCategoryId={setSelectedStructureCategoryId}
-                updateCategory={updateCategory}
-                handleDeleteCategory={handleDeleteCategory}
-                newCategoryName={newCategoryName}
-                setNewCategoryName={setNewCategoryName}
-                newCategoryDescription={newCategoryDescription}
-                setNewCategoryDescription={setNewCategoryDescription}
-                newCategoryStaff={newCategoryStaff}
-                setNewCategoryStaff={setNewCategoryStaff}
-                handleAddCategory={handleAddCategory}
-                newItemText={newItemText}
-                setNewItemText={setNewItemText}
-                newItemDescription={newItemDescription}
-                setNewItemDescription={setNewItemDescription}
-                newItemGuidance={newItemGuidance}
-                setNewItemGuidance={setNewItemGuidance}
-                newItemBlock={newItemBlock}
-                setNewItemBlock={setNewItemBlock}
-                newItemSector={newItemSector}
-                setNewItemSector={setNewItemSector}
-                newItemResponsibleRoles={newItemResponsibleRoles}
-                setNewItemResponsibleRoles={setNewItemResponsibleRoles}
-                newItemPriority={newItemPriority}
-                setNewItemPriority={setNewItemPriority}
-                newItemWeight={newItemWeight}
-                setNewItemWeight={setNewItemWeight}
-                newItemRequired={newItemRequired}
-                setNewItemRequired={setNewItemRequired}
-                newItemAllowsNa={newItemAllowsNa}
-                setNewItemAllowsNa={setNewItemAllowsNa}
-                newItemActive={newItemActive}
-                setNewItemActive={setNewItemActive}
-                newItemRequiresCommentOnFail={newItemRequiresCommentOnFail}
-                setNewItemRequiresCommentOnFail={setNewItemRequiresCommentOnFail}
-                handleAddItem={handleAddItem}
-              />
-              </>
-              )}
-
-              {reportsPanel === "kpis" && (
-              <>
-              <ControlKpisPanel
-                reportFilter={reportFilter}
-                setReportFilter={setReportFilter}
-                auditCategories={auditCategories}
-                allStaffOptions={allStaffOptions}
-                filteredReportSessions={filteredReportSessions}
-                reportCategoryItems={reportCategoryItems}
-              />
-              </>
-              )}
             </motion.div>
           )}
+
+
           {view === "history" && (
             <motion.div 
               key="history"
@@ -2074,33 +2923,35 @@ function AuditApp() {
               exit={{ opacity: 0, x: -20 }}
               className="space-y-6"
             >
-              <HistoryView
-                historyPanel={historyPanel}
-                setHistoryPanel={setHistoryPanel}
-                filteredHistory={filteredHistory}
-                selectedHistoryAudit={selectedHistoryAudit}
-                historyAverageScore={historyAverageScore}
-                nonCompliantAudits={nonCompliantAudits}
-                latestHistoryItem={latestHistoryItem}
-                searchTerm={searchTerm}
-                setSearchTerm={setSearchTerm}
-                onBack={() => setView("dashboard")}
-                onSelectAudit={setSelectedAudit}
-                onExportCsv={exportToCSV}
-                onSyncData={syncData}
-                isSyncing={isSyncing}
-                isHistorySyncConfigured={isHistorySyncConfigured}
-                isUsingExternalHistory={isUsingExternalHistory}
-                hasWebhookUrl={hasWebhookUrl}
-                hasSheetCsvUrl={hasSheetCsvUrl}
-                totalHistoryCount={history.length}
-              />
+              <Suspense fallback={<div className="rounded-[1.8rem] border border-slate-200 bg-white p-6 text-sm font-bold text-slate-500">Cargando historial...</div>}>
+                <HistoryView
+                  historyPanel={historyPanel}
+                  setHistoryPanel={setHistoryPanel}
+                  filteredHistory={filteredHistory}
+                  selectedHistoryAudit={selectedHistoryAudit}
+                  historyAverageScore={historyAverageScore}
+                  nonCompliantAudits={nonCompliantAudits}
+                  latestHistoryItem={latestHistoryItem}
+                  searchTerm={searchTerm}
+                  setSearchTerm={setSearchTerm}
+                  onBack={() => setView("dashboard")}
+                  onSelectAudit={setSelectedAudit}
+                  onExportCsv={exportToCSV}
+                  onSyncData={syncData}
+                  isSyncing={isSyncing}
+                  isHistorySyncConfigured={isHistorySyncConfigured}
+                  isUsingExternalHistory={isUsingExternalHistory}
+                  hasWebhookUrl={hasWebhookUrl}
+                  hasSheetCsvUrl={hasSheetCsvUrl}
+                  totalHistoryCount={history.length}
+                />
+              </Suspense>
             </motion.div>
           )}
         </AnimatePresence>
       </main>
 
-      {(view === "dashboard" || view === "history" || view === "reports") && (
+      {(view === "dashboard" || view === "history") && canRunAudits && (
         <button
           onClick={startNewAudit}
           className="fixed bottom-5 right-5 z-30 inline-flex h-14 w-14 items-center justify-center rounded-full bg-blue-600 text-white shadow-2xl shadow-blue-300/60 transition-all active:scale-95 lg:hidden"
@@ -2112,10 +2963,15 @@ function AuditApp() {
 
       <AppModal 
         isOpen={showConfirmModal}
-        onClose={() => setShowConfirmModal(false)}
-        onConfirm={submitAudit}
-        title="¿Finalizar Auditoría?"
-        message={`Quedan ${optionalPendingCount} ítems opcionales sin responder. ¿Deseás finalizar igualmente?`}
+        onClose={() => {
+          setShowConfirmModal(false);
+          setPendingOrdersSubmitMode("finish");
+        }}
+        onConfirm={() => submitAudit(pendingOrdersSubmitMode)}
+        title={pendingOrdersSubmitMode === "continue" ? "¿Guardar y continuar con otra OR?" : "¿Guardar y finalizar auditoría?"}
+        message={pendingOrdersSubmitMode === "continue"
+          ? `Quedan ${optionalPendingCount} ítems opcionales sin responder. ¿Deseás guardar esta OR y continuar con otra igualmente?`
+          : `Quedan ${optionalPendingCount} ítems opcionales sin responder. ¿Deseás finalizar igualmente?`}
       />
 
       <AnimatePresence>
@@ -2167,12 +3023,15 @@ function AuditApp() {
                           <Button
                             variant="secondary"
                             size="sm"
-                            onClick={() => generateAuditPdfReport({
-                              appTitle,
-                              session: report.session,
-                              auditorName: report.auditorName,
-                              templateItems: report.templateItems,
-                            })}
+                            onClick={async () => {
+                              const { generateAuditPdfReport } = await import("./services/audit-report-pdf");
+                              await generateAuditPdfReport({
+                                appTitle,
+                                session: report.session,
+                                auditorName: report.auditorName,
+                                templateItems: report.templateItems,
+                              });
+                            }}
                           >
                             <FileText className="h-4 w-4" />
                             PDF
@@ -2341,6 +3200,7 @@ function AuditApp() {
         </button>
         <button 
           onClick={startNewAudit}
+          disabled={!canRunAudits}
           className={cn(
             "flex flex-col items-center gap-1 transition-all active:scale-90",
             (view === "setup" || view === "audit") ? "text-blue-600" : "text-slate-400"
@@ -2358,19 +3218,6 @@ function AuditApp() {
         >
           <History className="w-6 h-6" />
           <span className="text-[10px] font-black uppercase tracking-widest">Historial</span>
-        </button>
-        <button 
-          onClick={() => {
-            setReportsPanel("kpis");
-            setView("reports");
-          }}
-          className={cn(
-            "flex flex-col items-center gap-1 transition-all active:scale-90",
-            view === "reports" ? "text-blue-600" : "text-slate-400"
-          )}
-        >
-          <Settings className="w-6 h-6" />
-          <span className="text-[10px] font-black uppercase tracking-widest">Control</span>
         </button>
       </nav>
     </div>

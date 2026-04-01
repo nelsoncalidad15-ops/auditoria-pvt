@@ -2,11 +2,11 @@ import React from "react";
 import { cn } from "../../lib/utils";
 
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("panel-premium rounded-[2rem]", className)} {...props} />;
+  return <div className={cn("rounded-[2rem] border border-blue-100/90 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.93))] shadow-[0_18px_40px_rgba(15,23,42,0.06)]", className)} {...props} />;
 }
 
 export function GlassCard({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("glass-panel rounded-[2rem]", className)} {...props} />;
+  return <div className={cn("rounded-[2rem] border border-blue-100/75 bg-[linear-gradient(180deg,rgba(255,255,255,0.9),rgba(248,250,252,0.78))] shadow-[0_22px_46px_rgba(15,23,42,0.07)] backdrop-blur-[16px]", className)} {...props} />;
 }
 
 export function CardHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {

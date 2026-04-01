@@ -25,10 +25,10 @@ export function AppModal({ isOpen, onClose, onConfirm, title, message }: AppModa
             initial={{ opacity: 0, scale: 0.96, y: 20 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 20 }}
-            className="panel-premium relative w-full max-w-md space-y-6 rounded-[2rem] p-8"
+            className="relative w-full max-w-md space-y-6 rounded-[2rem] border border-blue-100 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.94))] p-8 shadow-[0_24px_60px_rgba(15,23,42,0.12)]"
           >
             <div className="space-y-2 text-center">
-              <span className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">Confirmación</span>
+              <span className="inline-flex rounded-full border border-blue-100 bg-blue-50/70 px-3 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-blue-700">Confirmación</span>
               <h3 className="text-xl font-black tracking-[-0.03em] text-slate-950">{title}</h3>
               <p className="text-sm font-medium leading-relaxed text-slate-500">{message}</p>
             </div>

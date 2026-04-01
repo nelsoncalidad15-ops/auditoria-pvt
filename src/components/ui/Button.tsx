@@ -10,11 +10,11 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantClasses: Record<ButtonVariant, string> = {
-  primary: "bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-700 hover:to-blue-600 shadow-[0_14px_34px_rgba(37,99,235,0.28)]",
-  secondary: "bg-white/90 text-slate-900 border border-slate-200 hover:border-slate-300 hover:bg-white shadow-[0_10px_28px_rgba(15,23,42,0.05)]",
-  ghost: "bg-transparent text-slate-600 hover:bg-slate-100/80",
-  success: "bg-gradient-to-r from-emerald-600 to-emerald-500 text-white hover:from-emerald-700 hover:to-emerald-600 shadow-[0_14px_34px_rgba(21,128,61,0.22)]",
-  danger: "bg-gradient-to-r from-red-600 to-red-500 text-white hover:from-red-700 hover:to-red-600 shadow-[0_14px_34px_rgba(220,38,38,0.2)]",
+  primary: "bg-gradient-to-r from-blue-700 via-blue-600 to-teal-600 text-white hover:from-blue-800 hover:via-blue-700 hover:to-teal-700 shadow-[0_14px_34px_rgba(29,78,216,0.30)]",
+  secondary: "bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.92))] text-slate-900 border border-blue-100 hover:border-blue-200 hover:bg-white shadow-[0_10px_28px_rgba(15,23,42,0.05)]",
+  ghost: "bg-transparent text-slate-600 hover:bg-blue-50/75 hover:text-blue-700",
+  success: "bg-gradient-to-r from-emerald-700 to-emerald-600 text-white hover:from-emerald-800 hover:to-emerald-700 shadow-[0_14px_34px_rgba(22,163,74,0.25)]",
+  danger: "bg-gradient-to-r from-red-700 to-red-600 text-white hover:from-red-800 hover:to-red-700 shadow-[0_14px_34px_rgba(220,38,38,0.24)]",
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
@@ -27,7 +27,7 @@ export function Button({ className, variant = "primary", size = "md", ...props }
   return (
     <button
       className={cn(
-        "inline-flex items-center justify-center gap-2 font-black uppercase tracking-[0.16em] transition-all duration-200 active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-50",
+        "inline-flex items-center justify-center gap-2 font-black uppercase tracking-[0.14em] transition-all duration-200 active:scale-[0.985] disabled:cursor-not-allowed disabled:opacity-50",
         variantClasses[variant],
         sizeClasses[size],
         className,

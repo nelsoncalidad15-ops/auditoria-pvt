@@ -4,11 +4,11 @@ import { cn } from "../../lib/utils";
 type StatusTone = "success" | "warning" | "danger" | "neutral" | "info";
 
 const toneClasses: Record<StatusTone, string> = {
-  success: "bg-emerald-50/90 text-emerald-700 border-emerald-200/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]",
-  warning: "bg-amber-50/90 text-amber-700 border-amber-200/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]",
-  danger: "bg-red-50/90 text-red-700 border-red-200/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]",
-  neutral: "bg-slate-100/90 text-slate-600 border-slate-200/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]",
-  info: "bg-blue-50/90 text-blue-700 border-blue-200/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]",
+  success: "bg-emerald-50/95 text-emerald-700 border-emerald-200/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]",
+  warning: "bg-amber-50/95 text-amber-700 border-amber-200/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]",
+  danger: "bg-red-50/95 text-red-700 border-red-200/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]",
+  neutral: "bg-slate-100/95 text-slate-600 border-slate-200/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]",
+  info: "bg-blue-50/95 text-blue-700 border-blue-200/95 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]",
 };
 
 interface StatusBadgeProps extends React.HTMLAttributes<HTMLSpanElement> {

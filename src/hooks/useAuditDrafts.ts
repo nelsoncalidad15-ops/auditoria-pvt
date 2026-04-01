@@ -3,7 +3,7 @@ import { AuditSession, Location, Role } from "../types";
 
 const AUDIT_DRAFTS_STORAGE_KEY = "auditDrafts";
 
-type AuditView = "dashboard" | "home" | "setup" | "audit" | "history" | "reports";
+type AuditView = "dashboard" | "home" | "setup" | "audit" | "history" | "structure" | "integrations";
 
 export interface AuditDraft {
   id: string;
@@ -15,6 +15,7 @@ export interface AuditDraft {
   role?: Role;
   items: AuditSession["items"];
   orderNumber?: string;
+  auditedFileNames?: string[];
   notes?: string;
   participants?: AuditSession["participants"];
   updatedAt: string;
@@ -52,6 +53,9 @@ function normalizeDraft(rawDraft: Partial<AuditDraft>): AuditDraft {
     role,
     items: Array.isArray(rawDraft.items) ? rawDraft.items : [],
     orderNumber: rawDraft.orderNumber?.trim() || undefined,
+    auditedFileNames: Array.isArray(rawDraft.auditedFileNames)
+      ? rawDraft.auditedFileNames.slice(0, 6).map((name) => String(name ?? "").trim())
+      : undefined,
     notes: rawDraft.notes?.trim() || undefined,
     participants: rawDraft.participants,
     updatedAt: rawDraft.updatedAt || new Date().toISOString(),
@@ -120,6 +124,7 @@ export function useAuditDrafts({ selectedRole, selectedStaff, session, sessionIt
       selectedRole ||
       selectedStaff ||
       session.orderNumber?.trim() ||
+      session.auditedFileNames?.some((name) => name?.trim()) ||
       session.notes?.trim() ||
       session.participants?.asesorServicio?.trim() ||
       session.participants?.tecnico?.trim() ||
@@ -151,6 +156,7 @@ export function useAuditDrafts({ selectedRole, selectedStaff, session, sessionIt
       role: persistedRole,
       items: sessionItems,
       orderNumber: session.orderNumber?.trim() || undefined,
+      auditedFileNames: session.auditedFileNames,
       notes: session.notes?.trim() || undefined,
       participants: session.participants,
       updatedAt: new Date().toISOString(),
@@ -167,6 +173,7 @@ export function useAuditDrafts({ selectedRole, selectedStaff, session, sessionIt
         role: currentDraft.role,
         items: currentDraft.items,
         orderNumber: currentDraft.orderNumber,
+        auditedFileNames: currentDraft.auditedFileNames,
         notes: currentDraft.notes,
         participants: currentDraft.participants,
       });
@@ -180,6 +187,7 @@ export function useAuditDrafts({ selectedRole, selectedStaff, session, sessionIt
         role: nextDraft.role,
         items: nextDraft.items,
         orderNumber: nextDraft.orderNumber,
+        auditedFileNames: nextDraft.auditedFileNames,
         notes: nextDraft.notes,
         participants: nextDraft.participants,
       });
